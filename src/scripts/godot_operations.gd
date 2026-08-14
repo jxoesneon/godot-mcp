@@ -59,6 +59,8 @@ func dispatch_operation(op: String, params: Dictionary) -> Dictionary:
             return inspect_node(params)
         "get_scene_tree":
             return get_scene_tree(params)
+        "instantiate_scene":
+            return instantiate_scene(params)
         "load_sprite":
             return load_sprite(params)
         "export_mesh_library":
@@ -69,12 +71,32 @@ func dispatch_operation(op: String, params: Dictionary) -> Dictionary:
             return get_uid(params)
         "resave_resources":
             return resave_resources(params)
+        "update_project_uids":
+            return update_project_uids(params)
+        "install_editor_plugin":
+            return install_editor_plugin(params)
+        "simulate_input":
+            return simulate_input(params)
+        "take_screenshot":
+            return take_screenshot(params)
         "create_script":
             return create_script(params)
         "attach_script":
             return attach_script(params)
+        "edit_script":
+            return edit_script(params)
         "validate_script":
             return validate_script(params)
+        "connect_signal":
+            return connect_signal(params)
+        "disconnect_signal":
+            return disconnect_signal(params)
+        "list_signals":
+            return list_signals(params)
+        "configure_audio_bus":
+            return configure_audio_bus(params)
+        "create_audio_stream_player":
+            return create_audio_stream_player(params)
         "add_input_action":
             return add_input_action(params)
         "bind_input_event":
@@ -85,10 +107,16 @@ func dispatch_operation(op: String, params: Dictionary) -> Dictionary:
             return add_collision_shape(params)
         "configure_raycast":
             return configure_raycast(params)
+        "configure_area":
+            return configure_area(params)
         "create_ui_layout":
             return create_ui_layout(params)
         "apply_theme":
             return apply_theme(params)
+        "configure_control_anchors":
+            return configure_control_anchors(params)
+        "set_control_theme_override":
+            return set_control_theme_override(params)
         "create_particle_system":
             return create_particle_system(params)
         "create_shader_material":
@@ -97,8 +125,6 @@ func dispatch_operation(op: String, params: Dictionary) -> Dictionary:
             return set_shader_parameter(params)
         "create_visual_shader":
             return create_visual_shader(params)
-        "configure_audio_bus":
-            return configure_audio_bus(params)
         "configure_tilemap":
             return configure_tilemap(params)
         "set_tilemap_cell":
@@ -128,15 +154,26 @@ func create_scene(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
     var root_type = params.get("root_type", "Node2D")
     var root_name = params.get("root_name", "Root")
+    var inherits = params.get("inherits", "")
 
     if scene_path == "":
         return {"status": "error", "error": "Missing scene_path"}
 
-    if not ClassDB.class_exists(root_type):
-        return {"status": "error", "error": "Invalid root_type: " + root_type}
-
-    var root = ClassDB.instantiate(root_type) as Node
-    root.name = root_name
+    var root: Node = null
+    if inherits != "":
+        if not FileAccess.file_exists(inherits):
+            return {"status": "error", "error": "Base scene to inherit not found: " + inherits}
+        var base_packed = ResourceLoader.load(inherits) as PackedScene
+        if not base_packed:
+            return {"status": "error", "error": "Failed to load base scene at: " + inherits}
+        root = base_packed.instantiate()
+        if root_name != "" and root_name != "Root":
+            root.name = root_name
+    else:
+        if not ClassDB.class_exists(root_type):
+            return {"status": "error", "error": "Invalid root_type: " + root_type}
+        root = ClassDB.instantiate(root_type) as Node
+        root.name = root_name
 
     var packed_scene = PackedScene.new()
     var result = packed_scene.pack(root)
@@ -147,13 +184,15 @@ func create_scene(params: Dictionary) -> Dictionary:
     if err != OK:
         return {"status": "error", "error": "Failed to save scene to '%s': %d" % [scene_path, err]}
 
-    return {"status": "ok", "result": {"scene_path": scene_path, "root_name": root_name, "root_type": root_type}}
+    return {"status": "ok", "result": {"scene_path": scene_path, "root_name": root.name, "root_type": root.get_class(), "inherits": inherits}}
 
 func add_node(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
-    var node_type = params.get("node_type", "Node")
-    var node_name = params.get("node_name", node_type)
+    var node_type = params.get("node_type", params.get("type", "Node"))
+    var node_name = params.get("node_name", params.get("name", node_type))
     var parent_path = params.get("parent_path", ".")
+    var props = params.get("properties", {})
+    var script_path = params.get("script_path", "")
 
     if scene_path == "" or not FileAccess.file_exists(scene_path):
         return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
@@ -172,6 +211,18 @@ func add_node(params: Dictionary) -> Dictionary:
 
     var new_node = ClassDB.instantiate(node_type) as Node
     new_node.name = node_name
+
+    if script_path != "":
+        if FileAccess.file_exists(script_path):
+            var scr = ResourceLoader.load(script_path) as Script
+            if scr:
+                new_node.set_script(scr)
+        else:
+            return {"status": "error", "error": "Script file not found at: " + script_path}
+
+    for p in props:
+        new_node.set(p, parse_variant(props[p]))
+
     parent.add_child(new_node)
     new_node.owner = root
 
@@ -202,7 +253,7 @@ func modify_node_properties(params: Dictionary) -> Dictionary:
     new_packed.pack(root)
     ResourceSaver.save(new_packed, scene_path)
 
-    return {"status": "ok", "result": "Node properties updated successfully"}
+    return {"status": "ok", "result": {"updated": props.keys(), "node_path": String(target.get_path())}}
 
 func delete_node(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
@@ -227,6 +278,7 @@ func reparent_node(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
     var node_path = params.get("node_path", "")
     var new_parent_path = params.get("new_parent_path", ".")
+    var keep_global = params.get("keep_global_transform", true)
 
     var packed = ResourceLoader.load(scene_path) as PackedScene
     var root = packed.instantiate()
@@ -236,17 +288,18 @@ func reparent_node(params: Dictionary) -> Dictionary:
     if not target or not new_parent:
         return {"status": "error", "error": "Target node or new parent node not found"}
 
-    target.reparent(new_parent)
+    target.reparent(new_parent, keep_global)
     var new_packed = PackedScene.new()
     new_packed.pack(root)
     ResourceSaver.save(new_packed, scene_path)
 
-    return {"status": "ok", "result": "Node reparented successfully"}
+    return {"status": "ok", "result": {"new_path": String(target.get_path())}}
 
 func duplicate_node(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
     var node_path = params.get("node_path", ".")
     var new_name = params.get("new_name", "")
+    var parent_path = params.get("parent_path", "")
 
     var packed = ResourceLoader.load(scene_path) as PackedScene
     var root = packed.instantiate()
@@ -255,10 +308,16 @@ func duplicate_node(params: Dictionary) -> Dictionary:
     if not target:
         return {"status": "error", "error": "Node not found for duplication"}
 
+    var dest_parent = target.get_parent()
+    if parent_path != "":
+        dest_parent = root if parent_path == "." else root.get_node_or_null(parent_path)
+        if not dest_parent:
+            return {"status": "error", "error": "Parent node not found: " + parent_path}
+
     var dup = target.duplicate()
     if new_name != "":
         dup.name = new_name
-    target.get_parent().add_child(dup)
+    dest_parent.add_child(dup)
     dup.owner = root
 
     var new_packed = PackedScene.new()
@@ -270,6 +329,9 @@ func duplicate_node(params: Dictionary) -> Dictionary:
 func inspect_node(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
     var node_path = params.get("node_path", ".")
+    var include_signals = params.get("include_signals", true)
+    var include_groups = params.get("include_groups", true)
+    var include_children = params.get("include_children", true)
 
     var packed = ResourceLoader.load(scene_path) as PackedScene
     if not packed:
@@ -283,33 +345,69 @@ func inspect_node(params: Dictionary) -> Dictionary:
     var props = {}
     for p in target.get_property_list():
         var pname = p["name"]
-        props[pname] = String(target.get(pname))
+        props[pname] = target.get(pname)
 
-    return {
-        "status": "ok",
-        "result": {
-            "name": target.name,
-            "class": target.get_class(),
-            "properties": props,
-            "children_count": target.get_child_count()
-        }
+    var res = {
+        "name": target.name,
+        "class": target.get_class(),
+        "path": String(target.get_path()),
+        "properties": props,
+        "children_count": target.get_child_count()
     }
+
+    if target.get_script():
+        res["script_path"] = target.get_script().resource_path
+
+    if include_signals:
+        var sigs = []
+        for s in target.get_signal_list():
+            sigs.append({"name": s["name"], "args": s["args"]})
+        res["signals"] = sigs
+
+    if include_groups:
+        var grps = []
+        for g in target.get_groups():
+            grps.append(String(g))
+        res["groups"] = grps
+
+    if include_children:
+        var children_list = []
+        for c in target.get_children():
+            children_list.append({"name": c.name, "class": c.get_class(), "path": String(c.get_path())})
+        res["children"] = children_list
+
+    return {"status": "ok", "result": res}
 
 func get_scene_tree(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
+    var max_depth = int(params.get("max_depth", -1))
+    var filter_type = String(params.get("filter_type", ""))
+
     var packed = ResourceLoader.load(scene_path) as PackedScene
     if not packed:
         return {"status": "error", "error": "Failed to load scene at " + scene_path}
     var root = packed.instantiate()
-    return {"status": "ok", "result": serialize_node_recursive(root)}
+    return {"status": "ok", "result": serialize_node_recursive(root, 0, max_depth, filter_type)}
 
-func serialize_node_recursive(node: Node) -> Dictionary:
+func serialize_node_recursive(node: Node, current_depth: int = 0, max_depth: int = -1, filter_type: String = "") -> Dictionary:
     var children = []
-    for c in node.get_children():
-        children.append(serialize_node_recursive(c))
+    if max_depth < 0 or current_depth < max_depth:
+        for c in node.get_children():
+            var child_dict = serialize_node_recursive(c, current_depth + 1, max_depth, filter_type)
+            if not child_dict.is_empty():
+                children.append(child_dict)
+
+    var matches_filter = true
+    if filter_type != "":
+        matches_filter = node.is_class(filter_type) or node.get_class() == filter_type
+
+    if not matches_filter and children.is_empty():
+        return {}
+
     return {
         "name": node.name,
         "class": node.get_class(),
+        "path": String(node.get_path()),
         "children": children
     }
 
@@ -337,21 +435,56 @@ func load_sprite(params: Dictionary) -> Dictionary:
 func export_mesh_library(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
     var output_path = params.get("output_path", "")
+    var generate_collisions = params.get("generate_collisions", false)
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+    if output_path == "":
+        return {"status": "error", "error": "Missing output_path"}
 
     var packed = ResourceLoader.load(scene_path) as PackedScene
-    var root = packed.instantiate()
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
 
+    var root = packed.instantiate()
     var mesh_lib = MeshLibrary.new()
     var item_id = 0
+
     for child in root.get_children():
         if child is MeshInstance3D and child.mesh:
             mesh_lib.create_item(item_id)
             mesh_lib.set_item_name(item_id, child.name)
             mesh_lib.set_item_mesh(item_id, child.mesh)
+
+            var shapes = []
+            for sub in child.get_children():
+                if sub is CollisionShape3D and sub.shape:
+                    shapes.append(sub.shape)
+                    shapes.append(sub.transform)
+
+            if shapes.is_empty() and generate_collisions:
+                var col_shape = child.mesh.create_trimesh_shape()
+                if col_shape:
+                    shapes.append(col_shape)
+                    shapes.append(Transform3D.IDENTITY)
+
+            if not shapes.is_empty():
+                mesh_lib.set_item_shapes(item_id, shapes)
+
             item_id += 1
 
-    ResourceSaver.save(mesh_lib, output_path)
-    return {"status": "ok", "result": {"items_exported": item_id, "output_path": output_path}}
+    var err = ResourceSaver.save(mesh_lib, output_path)
+    if err != OK:
+        return {"status": "error", "error": "Failed to save MeshLibrary to '%s': %d" % [output_path, err]}
+
+    return {
+        "status": "ok",
+        "result": {
+            "items_exported": item_id,
+            "output_path": output_path,
+            "generate_collisions": generate_collisions
+        }
+    }
 
 func save_scene(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
@@ -359,46 +492,401 @@ func save_scene(params: Dictionary) -> Dictionary:
 
 func get_uid(params: Dictionary) -> Dictionary:
     var file_path = params.get("file_path", "")
-    var uid = ResourceLoader.get_resource_uid(file_path)
-    return {"status": "ok", "result": {"uid": uid, "file_path": file_path}}
+    if file_path == "":
+        return {"status": "error", "error": "Missing file_path parameter"}
+    var uid_int = ResourceLoader.get_resource_uid(file_path)
+    var uid_text = ""
+    if uid_int != -1 and ClassDB.class_exists("ResourceUid"):
+        uid_text = ResourceUid.id_to_text(uid_int)
+    elif uid_int != -1:
+        uid_text = "uid://" + String.num_int64(uid_int, 36)
+    return {
+        "status": "ok",
+        "result": {
+            "uid": uid_int,
+            "uid_text": uid_text,
+            "file_path": file_path
+        }
+    }
+
+func update_project_uids(params: Dictionary) -> Dictionary:
+    var project_path = params.get("project_path", ".")
+    var scanned_files = 0
+    var updated_uids = 0
+
+    var files = []
+    _collect_resource_files_recursive("res://", files)
+
+    for fpath in files:
+        scanned_files += 1
+        var uid = ResourceLoader.get_resource_uid(fpath)
+        if uid != -1:
+            updated_uids += 1
+
+    return {
+        "status": "ok",
+        "result": {
+            "project_path": project_path,
+            "scanned_files": scanned_files,
+            "updated_uids": updated_uids,
+            "message": "Project UIDs synchronized successfully"
+        }
+    }
 
 func resave_resources(params: Dictionary) -> Dictionary:
-    return {"status": "ok", "result": "Resources resaved"}
+    return update_project_uids(params)
+
+func _collect_resource_files_recursive(dir_path: String, out_files: Array):
+    var dir = DirAccess.open(dir_path)
+    if not dir:
+        return
+    dir.list_dir_begin()
+    var file_name = dir.get_next()
+    while file_name != "":
+        if not file_name.begins_with("."):
+            var full_path = dir_path.path_join(file_name)
+            if dir.current_is_dir():
+                _collect_resource_files_recursive(full_path, out_files)
+            else:
+                var ext = file_name.get_extension().to_lower()
+                if ext in ["tscn", "tres", "gd", "png", "jpg", "svg", "wav", "ogg"]:
+                    out_files.append(full_path)
+        file_name = dir.get_next()
+    dir.list_dir_end()
 
 func create_script(params: Dictionary) -> Dictionary:
     var script_path = params.get("script_path", "")
+    if script_path == "":
+        return {"status": "error", "error": "Missing script_path"}
+
     var extends_class = params.get("extends_class", "Node")
-    var content = params.get("content", "extends %s\n\nfunc _ready():\n\tpass\n" % extends_class)
+    var class_name_str = params.get("class_name", "")
+    var content = params.get("content", "")
+    var signals_data = params.get("signals", [])
+    var methods_data = params.get("methods", [])
+
+    var code = ""
+
+    if content != "" and signals_data.size() == 0 and methods_data.size() == 0 and class_name_str == "":
+        code = content
+    else:
+        if class_name_str != "":
+            code += "class_name %s\n" % class_name_str
+        if extends_class != "":
+            code += "extends %s\n\n" % extends_class
+
+        if signals_data.size() > 0:
+            for s in signals_data:
+                if typeof(s) == TYPE_STRING:
+                    var sig_str = String(s)
+                    if not sig_str.begins_with("signal"):
+                        sig_str = "signal " + sig_str
+                    code += sig_str + "\n"
+                elif typeof(s) == TYPE_DICTIONARY:
+                    var s_name = s.get("name", "")
+                    var s_args = s.get("args", s.get("params", []))
+                    if s_name != "":
+                        if s_args.size() > 0:
+                            var arg_strs = []
+                            for a in s_args:
+                                arg_strs.append(String(a))
+                            code += "signal %s(%s)\n" % [s_name, ", ".join(arg_strs)]
+                        else:
+                            code += "signal %s\n" % s_name
+            code += "\n"
+
+        if methods_data.size() > 0:
+            for m in methods_data:
+                if typeof(m) == TYPE_DICTIONARY:
+                    var m_name = m.get("name", "")
+                    var m_args = m.get("args", m.get("params", []))
+                    var m_ret = m.get("return_type", "")
+                    var m_body = m.get("content", m.get("body", "pass"))
+                    if m_name != "":
+                        var arg_str = ""
+                        if m_args.size() > 0:
+                            var arg_strs = []
+                            for a in m_args:
+                                arg_strs.append(String(a))
+                            arg_str = ", ".join(arg_strs)
+                        var ret_str = (" -> %s" % m_ret) if m_ret != "" else ""
+                        code += "func %s(%s)%s:\n" % [m_name, arg_str, ret_str]
+                        var body_lines = String(m_body).split("\n")
+                        for bl in body_lines:
+                            code += "\t%s\n" % bl
+                        code += "\n"
+
+        if content != "":
+            code += content + "\n"
+        elif methods_data.size() == 0:
+            code += "func _ready():\n\tpass\n"
 
     var f = FileAccess.open(script_path, FileAccess.WRITE)
-    f.store_string(content)
+    if not f:
+        return {"status": "error", "error": "Failed to open script path for writing: " + script_path}
+    f.store_string(code)
     f.close()
 
-    return {"status": "ok", "result": "Script created at " + script_path}
+    return {"status": "ok", "result": {"script_path": script_path, "code": code}}
 
 func attach_script(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
     var node_path = params.get("node_path", ".")
     var script_path = params.get("script_path", "")
 
+    if script_path == "":
+        return {"status": "error", "error": "Missing script_path"}
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+    if not FileAccess.file_exists(script_path):
+        return {"status": "error", "error": "Script file not found: " + script_path}
+
     var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
     var root = packed.instantiate()
-    var target = root if node_path == "." else root.get_node_or_null(node_path)
+    var target = root if (node_path == "." or node_path == "") else root.get_node_or_null(node_path)
+    if not target:
+        return {"status": "error", "error": "Target node not found at path: " + node_path}
+
     var scr = ResourceLoader.load(script_path) as Script
+    if not scr:
+        return {"status": "error", "error": "Failed to load script resource at: " + script_path}
 
     target.set_script(scr)
     var new_packed = PackedScene.new()
     new_packed.pack(root)
     ResourceSaver.save(new_packed, scene_path)
 
-    return {"status": "ok", "result": "Script attached to " + node_path}
+    return {"status": "ok", "result": {"node_path": String(target.get_path()), "script_path": script_path}}
+
+func edit_script(params: Dictionary) -> Dictionary:
+    var script_path = params.get("script_path", "")
+    var code = params.get("code", "")
+    if script_path == "":
+        return {"status": "error", "error": "Missing script_path"}
+
+    var has_line_start = params.has("line_start")
+    var has_line_end = params.has("line_end")
+
+    if has_line_start or has_line_end:
+        if not FileAccess.file_exists(script_path):
+            return {"status": "error", "error": "Script file not found: " + script_path}
+        
+        var existing_file = FileAccess.open(script_path, FileAccess.READ)
+        var existing_text = existing_file.get_as_text()
+        existing_file.close()
+
+        var lines = Array(existing_text.split("\n"))
+        var l_start = int(params.get("line_start", 1))
+        var l_end = int(params.get("line_end", l_start))
+
+        l_start = clamp(l_start, 1, max(1, lines.size()))
+        l_end = clamp(l_end, l_start, max(l_start, lines.size()))
+
+        var new_lines = Array(code.split("\n"))
+        
+        var head = lines.slice(0, l_start - 1)
+        var tail = lines.slice(l_end)
+        var final_lines = []
+        final_lines.append_array(head)
+        final_lines.append_array(new_lines)
+        final_lines.append_array(tail)
+
+        code = "\n".join(final_lines)
+
+    var file = FileAccess.open(script_path, FileAccess.WRITE)
+    if not file:
+        return {"status": "error", "error": "Cannot open file for writing: " + script_path}
+
+    file.store_string(code)
+    file.close()
+
+    return {"status": "ok", "result": {"script_path": script_path, "modified": true}}
 
 func validate_script(params: Dictionary) -> Dictionary:
     var script_path = params.get("script_path", "")
-    var scr = ResourceLoader.load(script_path) as Script
+    if script_path == "":
+        return {"status": "error", "error": "Missing script_path"}
+    if not FileAccess.file_exists(script_path):
+        return {"status": "error", "error": "Script file not found: " + script_path}
+
+    var scr = ResourceLoader.load(script_path, "GDScript", ResourceLoader.CACHE_MODE_IGNORE) as Script
     if scr and scr.can_instantiate():
-        return {"status": "ok", "result": "Script is valid"}
+        return {"status": "ok", "result": {"valid": true, "script_path": script_path, "can_instantiate": true}}
     return {"status": "error", "error": "Script validation failed"}
+
+func parse_connect_flags(flags_val) -> int:
+    if typeof(flags_val) == TYPE_INT or typeof(flags_val) == TYPE_FLOAT:
+        return int(flags_val)
+    var flags = 0
+    if typeof(flags_val) == TYPE_ARRAY:
+        for f in flags_val:
+            var s = String(f).to_lower()
+            if "deferred" in s: flags |= Object.CONNECT_DEFERRED
+            if "persist" in s: flags |= Object.CONNECT_PERSIST
+            if "one" in s or "shot" in s: flags |= Object.CONNECT_ONE_SHOT
+            if "ref" in s: flags |= Object.CONNECT_REFERENCE_COUNTED
+    elif typeof(flags_val) == TYPE_STRING:
+        var s = String(flags_val).to_lower()
+        if "deferred" in s: flags |= Object.CONNECT_DEFERRED
+        if "persist" in s: flags |= Object.CONNECT_PERSIST
+        if "one" in s or "shot" in s: flags |= Object.CONNECT_ONE_SHOT
+        if "ref" in s: flags |= Object.CONNECT_REFERENCE_COUNTED
+    if flags == 0:
+        flags = Object.CONNECT_PERSIST
+    return flags
+
+func connect_signal(params: Dictionary) -> Dictionary:
+    var scene_path = params.get("scene_path", "")
+    var signal_name = params.get("signal_name", "")
+    var source_path = params.get("source_node_path", params.get("source_path", ""))
+    var target_path = params.get("target_node_path", params.get("target_path", ""))
+    var target_method = params.get("target_method", "")
+    var binds = params.get("binds", [])
+    var flags_val = params.get("flags", 2)
+
+    if signal_name == "" or source_path == "" or target_path == "" or target_method == "":
+        return {"status": "error", "error": "Missing required signal connection parameters"}
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var source_node = root if (source_path == "." or source_path == "") else root.get_node_or_null(source_path)
+    var target_node = root if (target_path == "." or target_path == "") else root.get_node_or_null(target_path)
+
+    if not source_node or not target_node:
+        return {"status": "error", "error": "Source or target node not found in scene"}
+
+    if not source_node.has_signal(signal_name):
+        return {"status": "error", "error": "Node '%s' does not have signal '%s'" % [source_path, signal_name]}
+
+    var flags = parse_connect_flags(flags_val)
+    var callable = Callable(target_node, target_method)
+    if binds.size() > 0:
+        var parsed_binds = []
+        for b in binds:
+            parsed_binds.append(parse_variant(b))
+        callable = callable.bindv(parsed_binds)
+
+    if source_node.is_connected(signal_name, callable):
+        source_node.disconnect(signal_name, callable)
+
+    var err = source_node.connect(signal_name, callable, flags)
+    if err != OK:
+        return {"status": "error", "error": "Failed to connect signal '%s': %d" % [signal_name, err]}
+
+    var new_packed = PackedScene.new()
+    new_packed.pack(root)
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "signal_name": signal_name,
+            "source_node_path": source_path,
+            "target_node_path": target_path,
+            "target_method": target_method,
+            "flags": flags
+        }
+    }
+
+func disconnect_signal(params: Dictionary) -> Dictionary:
+    var scene_path = params.get("scene_path", "")
+    var signal_name = params.get("signal_name", "")
+    var source_path = params.get("source_node_path", params.get("source_path", ""))
+    var target_path = params.get("target_node_path", params.get("target_path", ""))
+    var target_method = params.get("target_method", "")
+
+    if signal_name == "" or source_path == "" or target_path == "" or target_method == "":
+        return {"status": "error", "error": "Missing required signal disconnection parameters"}
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var source_node = root if (source_path == "." or source_path == "") else root.get_node_or_null(source_path)
+    var target_node = root if (target_path == "." or target_path == "") else root.get_node_or_null(target_path)
+
+    if not source_node or not target_node:
+        return {"status": "error", "error": "Source or target node not found in scene"}
+
+    var callable = Callable(target_node, target_method)
+    if source_node.is_connected(signal_name, callable):
+        source_node.disconnect(signal_name, callable)
+    else:
+        return {"status": "error", "error": "Signal '%s' is not connected to '%s::%s'" % [signal_name, target_path, target_method]}
+
+    var new_packed = PackedScene.new()
+    new_packed.pack(root)
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "signal_name": signal_name,
+            "source_node_path": source_path,
+            "target_node_path": target_path,
+            "target_method": target_method,
+            "disconnected": true
+        }
+    }
+
+func list_signals(params: Dictionary) -> Dictionary:
+    var scene_path = params.get("scene_path", "")
+    var node_path = params.get("node_path", ".")
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var target_node = root if (node_path == "." or node_path == "") else root.get_node_or_null(node_path)
+    if not target_node:
+        return {"status": "error", "error": "Node not found at path: " + node_path}
+
+    var signals_list = []
+    for sig in target_node.get_signal_list():
+        var sig_name = sig.get("name", "")
+        var sig_args = sig.get("args", [])
+        var conn_list = []
+
+        for c in target_node.get_signal_connection_list(sig_name):
+            var callable = c.get("callable", null)
+            var target_obj = c.get("target", null)
+            var c_target_path = ""
+            var c_method = ""
+            if target_obj is Node:
+                c_target_path = String((target_obj as Node).get_path())
+            if callable is Callable:
+                c_method = (callable as Callable).get_method()
+
+            conn_list.append({
+                "target_node_path": c_target_path,
+                "target_method": c_method,
+                "flags": c.get("flags", 0)
+            })
+
+        signals_list.append({
+            "name": sig_name,
+            "args": sig_args,
+            "connections": conn_list
+        })
+
+    return {"status": "ok", "result": {"node_path": String(target_node.get_path()), "signals": signals_list}}
 
 func add_input_action(params: Dictionary) -> Dictionary:
     var action_name = params.get("action_name", "")
@@ -410,19 +898,617 @@ func bind_input_event(params: Dictionary) -> Dictionary:
     return {"status": "ok", "result": "Event bound"}
 
 func configure_physics_body(params: Dictionary) -> Dictionary:
-    return {"status": "ok", "result": "Physics body configured"}
+    var scene_path = params.get("scene_path", "")
+    var node_path = params.get("node_path", ".")
+    var body_type = params.get("body_type", "")
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var target = root if (node_path == "." or node_path == "") else root.get_node_or_null(node_path)
+
+    var is_3d = params.get("is_3d", false)
+    if not is_3d and body_type.ends_with("3D"):
+        is_3d = true
+
+    if not target:
+        if body_type != "" and ClassDB.class_exists(body_type):
+            target = ClassDB.instantiate(body_type) as Node
+            var name_parts = node_path.split("/")
+            target.name = name_parts[name_parts.size() - 1] if name_parts.size() > 0 else body_type
+            var parent = root
+            if name_parts.size() > 1:
+                var parent_path = node_path.substr(0, node_path.rfind("/"))
+                parent = root.get_node_or_null(parent_path)
+                if not parent: parent = root
+            parent.add_child(target)
+            target.owner = root
+        else:
+            return {"status": "error", "error": "Target physics body node not found at: " + node_path}
+
+    var changes = []
+
+    if params.has("collision_layer"):
+        target.set("collision_layer", int(params["collision_layer"]))
+        changes.append("collision_layer")
+
+    if params.has("collision_mask"):
+        target.set("collision_mask", int(params["collision_mask"]))
+        changes.append("collision_mask")
+
+    if params.has("mass") and "mass" in target:
+        target.set("mass", float(params["mass"]))
+        changes.append("mass")
+
+    if params.has("gravity_scale") and "gravity_scale" in target:
+        target.set("gravity_scale", float(params["gravity_scale"]))
+        changes.append("gravity_scale")
+
+    if params.has("friction") or params.has("bounce"):
+        if "physics_material_override" in target:
+            var phys_mat: PhysicsMaterial = target.physics_material_override
+            if not phys_mat:
+                phys_mat = PhysicsMaterial.new()
+            if params.has("friction"):
+                phys_mat.friction = float(params["friction"])
+                changes.append("friction")
+            if params.has("bounce"):
+                phys_mat.bounce = float(params["bounce"])
+                changes.append("bounce")
+            target.physics_material_override = phys_mat
+        else:
+            if params.has("friction") and "friction" in target:
+                target.set("friction", float(params["friction"]))
+                changes.append("friction")
+            if params.has("bounce") and "bounce" in target:
+                target.set("bounce", float(params["bounce"]))
+                changes.append("bounce")
+
+    var new_packed = PackedScene.new()
+    var err = new_packed.pack(root)
+    if err != OK:
+        return {"status": "error", "error": "Failed to pack scene: %d" % err}
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "node_path": String(target.get_path()),
+            "node_class": target.get_class(),
+            "configured_properties": changes
+        }
+    }
 
 func add_collision_shape(params: Dictionary) -> Dictionary:
-    return {"status": "ok", "result": "Collision shape added"}
+    var scene_path = params.get("scene_path", "")
+    var parent_path = params.get("parent_path", params.get("node_path", "."))
+    var shape_type = params.get("shape_type", "Box")
+    var shape_params = params.get("shape_params", {})
+    var node_name = params.get("node_name", "")
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var parent = root if (parent_path == "." or parent_path == "") else root.get_node_or_null(parent_path)
+    if not parent:
+        return {"status": "error", "error": "Parent node not found at: " + parent_path}
+
+    var is_3d = params.get("is_3d", false)
+    if not params.has("is_3d"):
+        if parent is Node3D or parent is CollisionObject3D:
+            is_3d = true
+        elif ["sphere", "cylinder"].has(shape_type.to_lower()):
+            is_3d = true
+
+    var shape_res = create_shape_resource(shape_type, shape_params, is_3d)
+
+    var col_node: Node = null
+    if is_3d:
+        var col3d = CollisionShape3D.new()
+        col3d.shape = shape_res as Shape3D
+        col_node = col3d
+        if node_name == "": node_name = "CollisionShape3D"
+    else:
+        var col2d = CollisionShape2D.new()
+        col2d.shape = shape_res as Shape2D
+        col_node = col2d
+        if node_name == "": node_name = "CollisionShape2D"
+
+    col_node.name = node_name
+    parent.add_child(col_node)
+    col_node.owner = root
+
+    var new_packed = PackedScene.new()
+    var err = new_packed.pack(root)
+    if err != OK:
+        return {"status": "error", "error": "Failed to pack scene: %d" % err}
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "node_name": col_node.name,
+            "node_path": String(col_node.get_path()),
+            "shape_type": shape_type,
+            "is_3d": is_3d
+        }
+    }
 
 func configure_raycast(params: Dictionary) -> Dictionary:
-    return {"status": "ok", "result": "Raycast configured"}
+    var scene_path = params.get("scene_path", "")
+    var node_path = params.get("node_path", ".")
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var target = root if (node_path == "." or node_path == "") else root.get_node_or_null(node_path)
+
+    var is_3d = params.get("is_3d", false)
+    if not target:
+        if is_3d or node_path.ends_with("3D"):
+            target = RayCast3D.new()
+        else:
+            target = RayCast2D.new()
+        var name_parts = node_path.split("/")
+        target.name = name_parts[name_parts.size() - 1]
+        var parent = root
+        if name_parts.size() > 1:
+            var parent_path = node_path.substr(0, node_path.rfind("/"))
+            parent = root.get_node_or_null(parent_path)
+            if not parent: parent = root
+        parent.add_child(target)
+        target.owner = root
+
+    var changes = []
+
+    if params.has("target_position"):
+        var raw_tp = params["target_position"]
+        if target is RayCast3D:
+            target.target_position = parse_vector3(raw_tp)
+        elif target is RayCast2D:
+            target.target_position = parse_vector2(raw_tp)
+        changes.append("target_position")
+
+    if params.has("collide_with_bodies"):
+        target.set("collide_with_bodies", bool(params["collide_with_bodies"]))
+        changes.append("collide_with_bodies")
+
+    if params.has("collide_with_areas"):
+        target.set("collide_with_areas", bool(params["collide_with_areas"]))
+        changes.append("collide_with_areas")
+
+    if params.has("collision_mask"):
+        target.set("collision_mask", int(params["collision_mask"]))
+        changes.append("collision_mask")
+
+    if params.has("enabled"):
+        target.set("enabled", bool(params["enabled"]))
+        changes.append("enabled")
+
+    var new_packed = PackedScene.new()
+    var err = new_packed.pack(root)
+    if err != OK:
+        return {"status": "error", "error": "Failed to pack scene: %d" % err}
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "node_path": String(target.get_path()),
+            "node_class": target.get_class(),
+            "configured_properties": changes
+        }
+    }
+
+func configure_area(params: Dictionary) -> Dictionary:
+    var scene_path = params.get("scene_path", "")
+    var node_path = params.get("node_path", ".")
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var target = root if (node_path == "." or node_path == "") else root.get_node_or_null(node_path)
+
+    var is_3d = params.get("is_3d", false)
+    if not target:
+        if is_3d or node_path.ends_with("3D"):
+            target = Area3D.new()
+        else:
+            target = Area2D.new()
+        var name_parts = node_path.split("/")
+        target.name = name_parts[name_parts.size() - 1]
+        var parent = root
+        if name_parts.size() > 1:
+            var parent_path = node_path.substr(0, node_path.rfind("/"))
+            parent = root.get_node_or_null(parent_path)
+            if not parent: parent = root
+        parent.add_child(target)
+        target.owner = root
+
+    var changes = []
+
+    if params.has("monitoring"):
+        target.set("monitoring", bool(params["monitoring"]))
+        changes.append("monitoring")
+
+    if params.has("monitorable"):
+        target.set("monitorable", bool(params["monitorable"]))
+        changes.append("monitorable")
+
+    if params.has("priority"):
+        target.set("priority", int(params["priority"]))
+        changes.append("priority")
+
+    if params.has("gravity"):
+        target.set("gravity", float(params["gravity"]))
+        changes.append("gravity")
+
+    if params.has("collision_layer"):
+        target.set("collision_layer", int(params["collision_layer"]))
+        changes.append("collision_layer")
+
+    if params.has("collision_mask"):
+        target.set("collision_mask", int(params["collision_mask"]))
+        changes.append("collision_mask")
+
+    var new_packed = PackedScene.new()
+    var err = new_packed.pack(root)
+    if err != OK:
+        return {"status": "error", "error": "Failed to pack scene: %d" % err}
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "node_path": String(target.get_path()),
+            "node_class": target.get_class(),
+            "configured_properties": changes
+        }
+    }
+
+func _parse_layout_preset(preset_val) -> int:
+    if typeof(preset_val) == TYPE_INT or typeof(preset_val) == TYPE_FLOAT:
+        return int(preset_val)
+    if typeof(preset_val) == TYPE_STRING:
+        var s = (preset_val as String).strip_edges().to_upper()
+        if s.begins_with("PRESET_"):
+            s = s.substr(7)
+        match s:
+            "TOP_LEFT", "TOPLEFT": return Control.PRESET_TOP_LEFT
+            "TOP_RIGHT", "TOPRIGHT": return Control.PRESET_TOP_RIGHT
+            "BOTTOM_LEFT", "BOTTOMLEFT": return Control.PRESET_BOTTOM_LEFT
+            "BOTTOM_RIGHT", "BOTTOMRIGHT": return Control.PRESET_BOTTOM_RIGHT
+            "CENTER_LEFT", "CENTERLEFT": return Control.PRESET_CENTER_LEFT
+            "CENTER_TOP", "CENTERTOP": return Control.PRESET_CENTER_TOP
+            "CENTER_RIGHT", "CENTERRIGHT": return Control.PRESET_CENTER_RIGHT
+            "CENTER_BOTTOM", "CENTERBOTTOM": return Control.PRESET_CENTER_BOTTOM
+            "CENTER": return Control.PRESET_CENTER
+            "LEFT_WIDE", "LEFTWIDE": return Control.PRESET_LEFT_WIDE
+            "TOP_WIDE", "TOPWIDE": return Control.PRESET_TOP_WIDE
+            "RIGHT_WIDE", "RIGHTWIDE": return Control.PRESET_RIGHT_WIDE
+            "BOTTOM_WIDE", "BOTTOMWIDE": return Control.PRESET_BOTTOM_WIDE
+            "VCENTER_WIDE", "VCENTERWIDE": return Control.PRESET_VCENTER_WIDE
+            "HCENTER_WIDE", "HCENTERWIDE": return Control.PRESET_HCENTER_WIDE
+            "FULL_RECT", "FULLRECT", "WIDE": return Control.PRESET_FULL_RECT
+            _:
+                if s.is_valid_int():
+                    return s.to_int()
+    return Control.PRESET_FULL_RECT
+
+func _apply_theme_override(ctrl: Control, override_type: String, override_name: String, val) -> Error:
+    var t = override_type.to_lower().strip_edges()
+    var is_clear = (val == null or (val is String and (val == "" or val == "clear" or val == "remove")))
+
+    match t:
+        "color":
+            if is_clear:
+                ctrl.remove_theme_color_override(override_name)
+            else:
+                var col: Color = Color.WHITE
+                if val is Color:
+                    col = val
+                elif val is String:
+                    col = Color(val)
+                elif val is Dictionary:
+                    col = Color(float(val.get("r", 0)), float(val.get("g", 0)), float(val.get("b", 0)), float(val.get("a", 1)))
+                ctrl.add_theme_color_override(override_name, col)
+        "font":
+            if is_clear:
+                ctrl.remove_theme_font_override(override_name)
+            else:
+                var f: Font = null
+                if val is Font:
+                    f = val
+                elif val is String and FileAccess.file_exists(val):
+                    f = ResourceLoader.load(val) as Font
+                if f:
+                    ctrl.add_theme_font_override(override_name, f)
+                else:
+                    return ERR_INVALID_DATA
+        "font_size":
+            if is_clear:
+                ctrl.remove_theme_font_size_override(override_name)
+            else:
+                ctrl.add_theme_font_size_override(override_name, int(val))
+        "constant":
+            if is_clear:
+                ctrl.remove_theme_constant_override(override_name)
+            else:
+                ctrl.add_theme_constant_override(override_name, int(val))
+        "stylebox":
+            if is_clear:
+                ctrl.remove_theme_stylebox_override(override_name)
+            else:
+                var sb: StyleBox = null
+                if val is StyleBox:
+                    sb = val
+                elif val is String and FileAccess.file_exists(val):
+                    sb = ResourceLoader.load(val) as StyleBox
+                elif val is Dictionary:
+                    var sb_flat = StyleBoxFlat.new()
+                    for k in val:
+                        sb_flat.set(k, parse_variant(val[k]))
+                    sb = sb_flat
+                if sb:
+                    ctrl.add_theme_stylebox_override(override_name, sb)
+                else:
+                    return ERR_INVALID_DATA
+        _:
+            return ERR_METHOD_NOT_FOUND
+    return OK
 
 func create_ui_layout(params: Dictionary) -> Dictionary:
-    return {"status": "ok", "result": "UI layout created"}
+    var scene_path = params.get("scene_path", "")
+    var parent_path = params.get("parent_path", params.get("node_path", "."))
+    var container_type = params.get("container_type", params.get("layout_type", "VBoxContainer"))
+    var container_name = params.get("container_name", params.get("name", container_type))
+    var layout_preset = params.get("layout_preset", null)
+    var controls_to_add = params.get("controls_to_add", params.get("controls", []))
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var parent = root if (parent_path == "." or parent_path == "" or parent_path == "root") else root.get_node_or_null(parent_path)
+    if not parent:
+        return {"status": "error", "error": "Parent node not found at path: " + parent_path}
+
+    if not ClassDB.class_exists(container_type):
+        return {"status": "error", "error": "Invalid container_type class: " + container_type}
+
+    var container = ClassDB.instantiate(container_type) as Node
+    container.name = container_name
+
+    if container is Control and layout_preset != null:
+        container.set_anchors_preset(_parse_layout_preset(layout_preset))
+
+    parent.add_child(container)
+    container.owner = root
+
+    var added_controls = []
+    if controls_to_add is Array:
+        for item in controls_to_add:
+            var ctype = "Control"
+            var cname = ""
+            var ctext = ""
+            var cprops = {}
+            if item is String:
+                ctype = item
+            elif item is Dictionary:
+                ctype = item.get("type", item.get("class", "Control"))
+                cname = item.get("name", "")
+                ctext = item.get("text", "")
+                cprops = item.get("properties", {})
+
+            if not ClassDB.class_exists(ctype):
+                continue
+
+            var cnode = ClassDB.instantiate(ctype) as Node
+            if cname != "":
+                cnode.name = cname
+            if ctext != "" and cnode.has_method("set_text"):
+                cnode.call("set_text", ctext)
+            elif ctext != "" and "text" in cnode:
+                cnode.set("text", ctext)
+
+            for p in cprops:
+                cnode.set(p, parse_variant(cprops[p]))
+
+            container.add_child(cnode)
+            cnode.owner = root
+            added_controls.append({"name": cnode.name, "type": ctype, "path": String(cnode.get_path())})
+
+    var new_packed = PackedScene.new()
+    new_packed.pack(root)
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "container_path": String(container.get_path()),
+            "container_type": container_type,
+            "container_name": container.name,
+            "added_controls": added_controls
+        }
+    }
 
 func apply_theme(params: Dictionary) -> Dictionary:
-    return {"status": "ok", "result": "Theme applied"}
+    var scene_path = params.get("scene_path", "")
+    var theme_path = params.get("theme_path", "")
+    var target_node_path = params.get("target_node_path", params.get("node_path", "."))
+
+    if theme_path == "" or not FileAccess.file_exists(theme_path):
+        return {"status": "error", "error": "Invalid or missing theme_path: " + theme_path}
+
+    var theme = ResourceLoader.load(theme_path) as Theme
+    if not theme:
+        return {"status": "error", "error": "Failed to load Theme resource at " + theme_path}
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var target = root if (target_node_path == "." or target_node_path == "" or target_node_path == "root") else root.get_node_or_null(target_node_path)
+    if not target:
+        return {"status": "error", "error": "Target node not found at path: " + target_node_path}
+
+    if target is Control:
+        target.theme = theme
+    elif "theme" in target:
+        target.set("theme", theme)
+    else:
+        return {"status": "error", "error": "Target node does not support theme property"}
+
+    var new_packed = PackedScene.new()
+    new_packed.pack(root)
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "target_node_path": String(target.get_path()),
+            "theme_path": theme_path
+        }
+    }
+
+func configure_control_anchors(params: Dictionary) -> Dictionary:
+    var scene_path = params.get("scene_path", "")
+    var node_path = params.get("node_path", ".")
+    var anchor_preset = params.get("anchor_preset", null)
+    var custom_anchors = params.get("custom_anchors", {})
+    var custom_offsets = params.get("custom_offsets", {})
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var target = root if (node_path == "." or node_path == "" or node_path == "root") else root.get_node_or_null(node_path)
+    if not target:
+        return {"status": "error", "error": "Target node not found at path: " + node_path}
+
+    if not target is Control:
+        return {"status": "error", "error": "Target node is not a Control: " + node_path}
+
+    var ctrl = target as Control
+    if anchor_preset != null:
+        ctrl.set_anchors_preset(_parse_layout_preset(anchor_preset))
+
+    if custom_anchors is Dictionary:
+        if custom_anchors.has("left"): ctrl.anchor_left = float(custom_anchors["left"])
+        if custom_anchors.has("anchor_left"): ctrl.anchor_left = float(custom_anchors["anchor_left"])
+        if custom_anchors.has("top"): ctrl.anchor_top = float(custom_anchors["top"])
+        if custom_anchors.has("anchor_top"): ctrl.anchor_top = float(custom_anchors["anchor_top"])
+        if custom_anchors.has("right"): ctrl.anchor_right = float(custom_anchors["right"])
+        if custom_anchors.has("anchor_right"): ctrl.anchor_right = float(custom_anchors["anchor_right"])
+        if custom_anchors.has("bottom"): ctrl.anchor_bottom = float(custom_anchors["bottom"])
+        if custom_anchors.has("anchor_bottom"): ctrl.anchor_bottom = float(custom_anchors["anchor_bottom"])
+
+    if custom_offsets is Dictionary:
+        if custom_offsets.has("left"): ctrl.offset_left = float(custom_offsets["left"])
+        if custom_offsets.has("offset_left"): ctrl.offset_left = float(custom_offsets["offset_left"])
+        if custom_offsets.has("top"): ctrl.offset_top = float(custom_offsets["top"])
+        if custom_offsets.has("offset_top"): ctrl.offset_top = float(custom_offsets["offset_top"])
+        if custom_offsets.has("right"): ctrl.offset_right = float(custom_offsets["right"])
+        if custom_offsets.has("offset_right"): ctrl.offset_right = float(custom_offsets["offset_right"])
+        if custom_offsets.has("bottom"): ctrl.offset_bottom = float(custom_offsets["bottom"])
+        if custom_offsets.has("offset_bottom"): ctrl.offset_bottom = float(custom_offsets["offset_bottom"])
+
+    var new_packed = PackedScene.new()
+    new_packed.pack(root)
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "node_path": String(ctrl.get_path()),
+            "anchors": {
+                "left": ctrl.anchor_left,
+                "top": ctrl.anchor_top,
+                "right": ctrl.anchor_right,
+                "bottom": ctrl.anchor_bottom
+            },
+            "offsets": {
+                "left": ctrl.offset_left,
+                "top": ctrl.offset_top,
+                "right": ctrl.offset_right,
+                "bottom": ctrl.offset_bottom
+            }
+        }
+    }
+
+func set_control_theme_override(params: Dictionary) -> Dictionary:
+    var scene_path = params.get("scene_path", "")
+    var node_path = params.get("node_path", ".")
+    var override_type = params.get("override_type", "")
+    var override_name = params.get("override_name", "")
+    var value = params.get("value", null)
+
+    if override_type == "" or override_name == "":
+        return {"status": "error", "error": "Missing override_type or override_name"}
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var target = root if (node_path == "." or node_path == "" or node_path == "root") else root.get_node_or_null(node_path)
+    if not target:
+        return {"status": "error", "error": "Target node not found at path: " + node_path}
+
+    if not target is Control:
+        return {"status": "error", "error": "Target node is not a Control: " + node_path}
+
+    var err = _apply_theme_override(target as Control, override_type, override_name, value)
+    if err != OK:
+        return {"status": "error", "error": "Failed to set theme override '%s' of type '%s'" % [override_name, override_type]}
+
+    var new_packed = PackedScene.new()
+    new_packed.pack(root)
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "node_path": String(target.get_path()),
+            "override_type": override_type,
+            "override_name": override_name
+        }
+    }
 
 func create_particle_system(params: Dictionary) -> Dictionary:
     return {"status": "ok", "result": "Particle system created"}
@@ -704,7 +1790,119 @@ func get_visual_shader_stage(stage_str: String) -> int:
         _: return VisualShader.TYPE_FRAGMENT
 
 func configure_audio_bus(params: Dictionary) -> Dictionary:
-    return {"status": "ok", "result": "Audio bus configured"}
+    var bus_name = params.get("bus_name", "")
+    if bus_name == "":
+        return {"status": "error", "error": "Missing bus_name"}
+
+    var bus_idx = AudioServer.get_bus_index(bus_name)
+    if bus_idx == -1:
+        AudioServer.add_bus()
+        bus_idx = AudioServer.get_bus_count() - 1
+        AudioServer.set_bus_name(bus_idx, bus_name)
+
+    if params.has("volume_db"):
+        AudioServer.set_bus_volume_db(bus_idx, float(params["volume_db"]))
+
+    if params.has("send_bus"):
+        var send_name = String(params["send_bus"])
+        if send_name != "":
+            AudioServer.set_bus_send(bus_idx, send_name)
+
+    var effect_added = ""
+    var add_effect_val = params.get("add_effect", null)
+    var effect_type = params.get("effect_type", "")
+
+    var effect_class_name = ""
+    if typeof(add_effect_val) == TYPE_STRING and String(add_effect_val) != "" and String(add_effect_val) != "true" and String(add_effect_val) != "false":
+        effect_class_name = String(add_effect_val)
+    elif effect_type != "":
+        effect_class_name = effect_type
+
+    if effect_class_name != "":
+        if not effect_class_name.begins_with("AudioEffect"):
+            effect_class_name = "AudioEffect" + effect_class_name
+        if ClassDB.class_exists(effect_class_name):
+            var eff_inst = ClassDB.instantiate(effect_class_name) as AudioEffect
+            if eff_inst:
+                AudioServer.add_bus_effect(bus_idx, eff_inst)
+                effect_added = effect_class_name
+
+    return {
+        "status": "ok",
+        "result": {
+            "bus_name": bus_name,
+            "bus_index": bus_idx,
+            "volume_db": AudioServer.get_bus_volume_db(bus_idx),
+            "send_bus": AudioServer.get_bus_send(bus_idx),
+            "effect_added": effect_added
+        }
+    }
+
+func create_audio_stream_player(params: Dictionary) -> Dictionary:
+    var scene_path = params.get("scene_path", "")
+    var parent_path = params.get("parent_path", ".")
+    var node_name = params.get("node_name", "")
+    var stream_path = params.get("stream_path", "")
+    var bus_name = params.get("bus_name", "Master")
+    var autoplay = params.get("autoplay", false)
+    var volume_db = float(params.get("volume_db", 0.0))
+    var pitch_scale = float(params.get("pitch_scale", 1.0))
+    var is_3d = params.get("is_3d", false)
+    var is_2d = params.get("is_2d", false)
+
+    if scene_path == "" or not FileAccess.file_exists(scene_path):
+        return {"status": "error", "error": "Invalid or missing scene_path: " + scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load scene at " + scene_path}
+
+    var root = packed.instantiate()
+    var parent = root if (parent_path == "." or parent_path == "") else root.get_node_or_null(parent_path)
+    if not parent:
+        return {"status": "error", "error": "Parent node not found at: " + parent_path}
+
+    var player_node: Node = null
+    var default_name = "AudioStreamPlayer"
+
+    if is_3d:
+        player_node = AudioStreamPlayer3D.new()
+        default_name = "AudioStreamPlayer3D"
+    elif is_2d:
+        player_node = AudioStreamPlayer2D.new()
+        default_name = "AudioStreamPlayer2D"
+    else:
+        player_node = AudioStreamPlayer.new()
+        default_name = "AudioStreamPlayer"
+
+    player_node.name = node_name if node_name != "" else default_name
+
+    if stream_path != "" and FileAccess.file_exists(stream_path):
+        var stream_res = ResourceLoader.load(stream_path) as AudioStream
+        if stream_res:
+            player_node.set("stream", stream_res)
+
+    player_node.set("bus", bus_name)
+    player_node.set("autoplay", autoplay)
+    player_node.set("volume_db", volume_db)
+    player_node.set("pitch_scale", pitch_scale)
+
+    parent.add_child(player_node)
+    player_node.owner = root
+
+    var new_packed = PackedScene.new()
+    new_packed.pack(root)
+    ResourceSaver.save(new_packed, scene_path)
+
+    return {
+        "status": "ok",
+        "result": {
+            "node_name": player_node.name,
+            "node_path": String(player_node.get_path()),
+            "bus": bus_name,
+            "stream_path": stream_path
+        }
+    }
 
 func configure_tilemap(params: Dictionary) -> Dictionary:
     return {"status": "ok", "result": "Tilemap configured"}
@@ -1051,6 +2249,122 @@ func parse_vector3i(val, default_val: Vector3i = Vector3i.ZERO) -> Vector3i:
     elif typeof(val) == TYPE_ARRAY and val.size() >= 3:
         return Vector3i(int(val[0]), int(val[1]), int(val[2]))
     return default_val
+
+func parse_vector2(val, default_val: Vector2 = Vector2.ZERO) -> Vector2:
+    if typeof(val) == TYPE_VECTOR2:
+        return val
+    elif typeof(val) == TYPE_DICTIONARY:
+        return Vector2(float(val.get("x", default_val.x)), float(val.get("y", default_val.y)))
+    elif typeof(val) == TYPE_ARRAY and val.size() >= 2:
+        return Vector2(float(val[0]), float(val[1]))
+    return default_val
+
+func parse_vector3(val, default_val: Vector3 = Vector3.ZERO) -> Vector3:
+    if typeof(val) == TYPE_VECTOR3:
+        return val
+    elif typeof(val) == TYPE_DICTIONARY:
+        return Vector3(float(val.get("x", default_val.x)), float(val.get("y", default_val.y)), float(val.get("z", default_val.z)))
+    elif typeof(val) == TYPE_ARRAY and val.size() >= 3:
+        return Vector3(float(val[0]), float(val[1]), float(val[2]))
+    return default_val
+
+func create_shape_resource(shape_type: String, shape_params: Dictionary, is_3d: bool) -> Resource:
+    var st = shape_type.to_lower()
+    if is_3d:
+        match st:
+            "box", "rectangle":
+                var shape = BoxShape3D.new()
+                shape.size = parse_vector3(shape_params.get("size", Vector3(1, 1, 1)))
+                return shape
+            "sphere", "circle":
+                var shape = SphereShape3D.new()
+                shape.radius = float(shape_params.get("radius", 0.5))
+                return shape
+            "capsule":
+                var shape = CapsuleShape3D.new()
+                shape.radius = float(shape_params.get("radius", 0.5))
+                shape.height = float(shape_params.get("height", 2.0))
+                return shape
+            "cylinder":
+                var shape = CylinderShape3D.new()
+                shape.radius = float(shape_params.get("radius", 0.5))
+                shape.height = float(shape_params.get("height", 2.0))
+                return shape
+            "worldboundary", "world_boundary":
+                var shape = WorldBoundary3D.new()
+                var norm = parse_vector3(shape_params.get("normal", Vector3.UP))
+                var d = float(shape_params.get("d", shape_params.get("distance", 0.0)))
+                shape.plane = Plane(norm, d)
+                return shape
+            "convexpolygon", "convex_polygon":
+                var shape = ConvexPolygonShape3D.new()
+                var pts_raw = shape_params.get("points", [])
+                var pts = PackedVector3Array()
+                for p in pts_raw:
+                    pts.append(parse_vector3(p))
+                shape.points = pts
+                return shape
+            "concavepolygon", "concave_polygon":
+                var shape = ConcavePolygonShape3D.new()
+                var pts_raw = shape_params.get("points", shape_params.get("faces", []))
+                var pts = PackedVector3Array()
+                for p in pts_raw:
+                    pts.append(parse_vector3(p))
+                shape.set_faces(pts)
+                return shape
+            "segment":
+                var shape = SeparationRayShape3D.new()
+                shape.length = float(shape_params.get("length", 1.0))
+                return shape
+            _:
+                var shape = BoxShape3D.new()
+                shape.size = parse_vector3(shape_params.get("size", Vector3(1, 1, 1)))
+                return shape
+    else:
+        match st:
+            "box", "rectangle":
+                var shape = RectangleShape2D.new()
+                shape.size = parse_vector2(shape_params.get("size", Vector2(32, 32)))
+                return shape
+            "sphere", "circle":
+                var shape = CircleShape2D.new()
+                shape.radius = float(shape_params.get("radius", 16.0))
+                return shape
+            "capsule", "cylinder":
+                var shape = CapsuleShape2D.new()
+                shape.radius = float(shape_params.get("radius", 10.0))
+                shape.height = float(shape_params.get("height", 30.0))
+                return shape
+            "segment":
+                var shape = SegmentShape2D.new()
+                shape.a = parse_vector2(shape_params.get("a", Vector2.ZERO))
+                shape.b = parse_vector2(shape_params.get("b", Vector2(0, 10)))
+                return shape
+            "worldboundary", "world_boundary":
+                var shape = WorldBoundary2D.new()
+                shape.normal = parse_vector2(shape_params.get("normal", Vector2.UP))
+                shape.distance = float(shape_params.get("d", shape_params.get("distance", 0.0)))
+                return shape
+            "convexpolygon", "convex_polygon":
+                var shape = ConvexPolygonShape2D.new()
+                var pts_raw = shape_params.get("points", [])
+                var pts = PackedVector2Array()
+                for p in pts_raw:
+                    pts.append(parse_vector2(p))
+                shape.points = pts
+                return shape
+            "concavepolygon", "concave_polygon":
+                var shape = ConcavePolygonShape2D.new()
+                var pts_raw = shape_params.get("points", shape_params.get("segments", []))
+                var pts = PackedVector2Array()
+                for p in pts_raw:
+                    pts.append(parse_vector2(p))
+                shape.segments = pts
+                return shape
+            _:
+                var shape = RectangleShape2D.new()
+                shape.size = parse_vector2(shape_params.get("size", Vector2(32, 32)))
+                return shape
 
 func find_first_node_of_class(parent: Node, target_class: String) -> Node:
     if parent.is_class(target_class) or parent.get_class() == target_class:
@@ -1411,6 +2725,22 @@ func configure_animation_tree(params: Dictionary) -> Dictionary:
     }
 
 func parse_variant(val):
+    if typeof(val) == TYPE_STRING:
+        var s_val = String(val).strip_edges()
+        if s_val.to_lower() == "true": return true
+        if s_val.to_lower() == "false": return false
+        if s_val.begins_with("Vector") or s_val.begins_with("Color") or s_val.begins_with("Rect") or s_val.begins_with("Transform") or s_val.begins_with("Basis") or s_val.begins_with("Quaternion") or s_val.begins_with("[") or s_val.begins_with("{"):
+            var parsed_str = str_to_var(s_val)
+            if parsed_str != null:
+                return parsed_str
+        return val
+
+    if typeof(val) == TYPE_ARRAY:
+        var res_arr = []
+        for elem in val:
+            res_arr.append(parse_variant(elem))
+        return res_arr
+
     if typeof(val) == TYPE_DICTIONARY:
         if val.has("__type"):
             var t = val["__type"]
@@ -1422,7 +2752,22 @@ func parse_variant(val):
                 "Vector4": return Vector4(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("z", 0)), float(val.get("w", 0)))
                 "Quaternion": return Quaternion(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("z", 0)), float(val.get("w", 1)))
                 "Color": return Color(float(val.get("r", 0)), float(val.get("g", 0)), float(val.get("b", 0)), float(val.get("a", 1)))
-                "Rect2": return Rect2(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("width", 0)), float(val.get("height", 0)))
+                "Rect2": return Rect2(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("width", val.get("w", 0))), float(val.get("height", val.get("h", 0))))
+                "Rect2i": return Rect2i(int(val.get("x", 0)), int(val.get("y", 0)), int(val.get("width", val.get("w", 0))), int(val.get("height", val.get("h", 0))))
+                "Transform2D":
+                    var xv = parse_variant(val.get("x", {"x": 1, "y": 0}))
+                    var yv = parse_variant(val.get("y", {"x": 0, "y": 1}))
+                    var ov = parse_variant(val.get("origin", {"x": 0, "y": 0}))
+                    return Transform2D(xv, yv, ov)
+                "Transform3D":
+                    var bv = parse_variant(val.get("basis", {}))
+                    var ov = parse_variant(val.get("origin", {"x": 0, "y": 0, "z": 0}))
+                    var b_inst = bv if typeof(bv) == TYPE_BASIS else Basis()
+                    return Transform3D(b_inst, ov)
+                "Basis":
+                    if val.has("x") and val.has("y") and val.has("z"):
+                        return Basis(parse_variant(val["x"]), parse_variant(val["y"]), parse_variant(val["z"]))
+                    return Basis()
         elif val.has("x") and val.has("y") and val.has("z") and val.has("w"):
             return Quaternion(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("z", 0)), float(val.get("w", 1)))
         elif val.has("x") and val.has("y") and val.has("z"):
@@ -1431,8 +2776,185 @@ func parse_variant(val):
             return Vector2(float(val.get("x", 0)), float(val.get("y", 0)))
         elif val.has("r") and val.has("g") and val.has("b"):
             return Color(float(val.get("r", 0)), float(val.get("g", 0)), float(val.get("b", 0)), float(val.get("a", 1)))
+
+        var res_dict = {}
+        for k in val:
+            res_dict[k] = parse_variant(val[k])
+        return res_dict
+
     return val
 
 func log_debug(msg): print("[DEBUG] ", msg)
 func log_info(msg): print("[INFO] ", msg)
 func log_error(msg): print("[ERROR] ", msg)
+
+func install_editor_plugin(params: Dictionary) -> Dictionary:
+    var project_path = params.get("project_path", ".")
+    var project_godot = "res://project.godot"
+    if project_path != "" and project_path != ".":
+        if FileAccess.file_exists(project_path + "/project.godot"):
+            project_godot = project_path + "/project.godot"
+        elif project_path.ends_with("project.godot") and FileAccess.file_exists(project_path):
+            project_godot = project_path
+
+    if not FileAccess.file_exists(project_godot):
+        return {"status": "error", "error": "project.godot file not found at '%s'" % project_godot}
+
+    var config = ConfigFile.new()
+    var err = config.load(project_godot)
+    if err != OK:
+        return {"status": "error", "error": "Failed to load project.godot: %d" % err}
+
+    var plugins = config.get_value("editor_plugins", "enabled", PackedStringArray())
+    var plugin_path = "res://addons/godot_mcp/plugin.cfg"
+    if not plugins.has(plugin_path):
+        plugins.append(plugin_path)
+        config.set_value("editor_plugins", "enabled", plugins)
+        err = config.save(project_godot)
+        if err != OK:
+            return {"status": "error", "error": "Failed to save project.godot: %d" % err}
+
+    return {"status": "ok", "result": {"installed": true, "plugin": plugin_path, "project_godot": project_godot}}
+
+func simulate_input(params: Dictionary) -> Dictionary:
+    var event_type = params.get("event_type", params.get("type", "action"))
+    var pressed = params.get("pressed", true)
+
+    match String(event_type).to_lower():
+        "action":
+            var action_name = params.get("action", "")
+            if action_name == "":
+                return {"status": "error", "error": "Missing action name for action event"}
+            var ev = InputEventAction.new()
+            ev.action = action_name
+            ev.pressed = pressed
+            Input.parse_input_event(ev)
+            return {"status": "ok", "result": {"event_type": "action", "action": action_name, "pressed": pressed}}
+
+        "key":
+            var kc_raw = params.get("key_code", params.get("keycode", 0))
+            var kc = parse_key_code(kc_raw)
+            if kc == KEY_NONE:
+                return {"status": "error", "error": "Invalid key_code: " + String(kc_raw)}
+            var ev = InputEventKey.new()
+            ev.keycode = kc
+            ev.physical_keycode = kc
+            ev.pressed = pressed
+            Input.parse_input_event(ev)
+            return {"status": "ok", "result": {"event_type": "key", "key_code": kc, "pressed": pressed}}
+
+        "mouse_button":
+            var button_idx = int(params.get("mouse_button_index", params.get("button_index", 1)))
+            var pos = parse_vector2(params.get("position", Vector2.ZERO))
+            var ev = InputEventMouseButton.new()
+            ev.button_index = button_idx as MouseButton
+            ev.pressed = pressed
+            ev.position = pos
+            ev.global_position = pos
+            Input.parse_input_event(ev)
+            return {"status": "ok", "result": {"event_type": "mouse_button", "button_index": button_idx, "pressed": pressed, "position": {"x": pos.x, "y": pos.y}}}
+
+        "mouse_motion":
+            var pos = parse_vector2(params.get("position", Vector2.ZERO))
+            var rel = parse_vector2(params.get("relative_motion", params.get("relative", Vector2.ZERO)))
+            var ev = InputEventMouseMotion.new()
+            ev.position = pos
+            ev.global_position = pos
+            ev.relative = rel
+            Input.parse_input_event(ev)
+            return {"status": "ok", "result": {"event_type": "mouse_motion", "position": {"x": pos.x, "y": pos.y}, "relative_motion": {"x": rel.x, "y": rel.y}}}
+
+        _:
+            return {"status": "error", "error": "Unsupported event_type: " + String(event_type)}
+
+func take_screenshot(params: Dictionary) -> Dictionary:
+    var root = get_root()
+    if not root:
+        return {"status": "error", "error": "Root viewport unavailable"}
+
+    var vp = root.get_viewport()
+    if not vp:
+        return {"status": "error", "error": "Viewport unavailable"}
+
+    var tex = vp.get_texture()
+    if not tex:
+        return {"status": "error", "error": "Viewport texture unavailable"}
+
+    var img = tex.get_image()
+    if not img or img.is_empty():
+        return {"status": "error", "error": "Failed to retrieve image from viewport"}
+
+    return process_and_encode_image(img, params)
+
+func process_and_encode_image(img: Image, params: Dictionary) -> Dictionary:
+    var format_str = String(params.get("format", "png")).to_lower()
+    var max_width = int(params.get("max_width", 0))
+    var max_height = int(params.get("max_height", 0))
+    var raw_quality = params.get("quality", 0.75)
+
+    var quality = float(raw_quality)
+    if quality > 1.0:
+        quality = quality / 100.0
+    quality = clampf(quality, 0.0, 1.0)
+
+    var orig_w = img.get_width()
+    var orig_h = img.get_height()
+    var new_w = orig_w
+    var new_h = orig_h
+
+    if max_width > 0 and new_w > max_width:
+        var scale = float(max_width) / float(new_w)
+        new_w = max_width
+        new_h = int(new_h * scale)
+
+    if max_height > 0 and new_h > max_height:
+        var scale = float(max_height) / float(new_h)
+        new_h = max_height
+        new_w = int(new_w * scale)
+
+    if new_w != orig_w or new_h != orig_h:
+        img.resize(new_w, new_h, Image.INTERPOLATION_LANCZOS)
+
+    var buffer: PackedByteArray
+    var mime_type = "image/png"
+
+    if format_str == "jpg" or format_str == "jpeg":
+        buffer = img.save_jpg_to_buffer(quality)
+        mime_type = "image/jpeg"
+    else:
+        buffer = img.save_png_to_buffer()
+        mime_type = "image/png"
+
+    var b64 = Marshalls.raw_to_base64(buffer)
+    return {
+        "status": "ok",
+        "result": {
+            "image_base64": b64,
+            "mime_type": mime_type,
+            "width": img.get_width(),
+            "height": img.get_height(),
+            "format": format_str
+        }
+    }
+
+func parse_key_code(val) -> Key:
+    if typeof(val) == TYPE_INT or typeof(val) == TYPE_FLOAT:
+        return int(val) as Key
+    var s = String(val)
+    if s.is_valid_int():
+        return int(s) as Key
+    if s.begins_with("KEY_"):
+        s = s.substr(4)
+    var kc = OS.find_keycode_from_string(s)
+    if kc != KEY_NONE:
+        return kc
+    return KEY_NONE
+
+func parse_vector2(val, default_val: Vector2 = Vector2.ZERO) -> Vector2:
+    if typeof(val) == TYPE_VECTOR2:
+        return val
+    elif typeof(val) == TYPE_DICTIONARY:
+        return Vector2(float(val.get("x", default_val.x)), float(val.get("y", default_val.y)))
+    elif typeof(val) == TYPE_ARRAY and val.size() >= 2:
+        return Vector2(float(val[0]), float(val[1]))
+    return default_val

@@ -12,7 +12,7 @@ import path from 'path';
 import fs from 'fs-extra';
 import { fileURLToPath } from 'url';
 import { GodotEditorBridge } from './bridge/websocket_client.js';
-import { parsePropertiesMap } from './utils/type_parser.js';
+import { parsePropertiesMap, parseGodotVariant } from './utils/type_parser.js';
 import { installEditorPlugin } from './tools/install_plugin.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -234,9 +234,14 @@ class GodotMCPServer {
             return { content: [{ type: 'text', text: JSON.stringify(projects, null, 2) }] };
           }
 
-          case 'modify_node_properties': {
+          case 'add_node':
+          case 'modify_node_properties':
+          case 'instantiate_scene': {
             if (parsedArgs.properties) {
               parsedArgs.properties = parsePropertiesMap(parsedArgs.properties);
+            }
+            if (parsedArgs.position) {
+              parsedArgs.position = parseGodotVariant(parsedArgs.position);
             }
             const res = await this.dispatchSmartOp(name, parsedArgs);
             return { content: [{ type: 'text', text: JSON.stringify(res, null, 2) }] };
@@ -316,39 +321,42 @@ class GodotMCPServer {
       },
       {
         name: 'create_scene',
-        description: 'Creates a new Godot scene (.tscn) file with specified root node type.',
+        description: 'Creates a new Godot scene (.tscn) file with specified root node type or inheriting from a base scene.',
         inputSchema: {
           type: 'object',
           properties: {
             scene_path: { type: 'string', description: 'res:// or file path' },
-            root_type: { type: 'string', description: 'Node2D, Node3D, Control, CharacterBody2D, etc.' },
-            root_name: { type: 'string', description: 'Name of root node' },
+            root_type: { type: 'string', description: 'Node2D, Node3D, Control, CharacterBody2D, etc. (default: Node2D)' },
+            root_name: { type: 'string', description: 'Name of root node (default: Root)' },
+            inherits: { type: 'string', description: 'Path to base .tscn scene file to inherit from' },
           },
           required: ['scene_path'],
         },
       },
       {
         name: 'add_node',
-        description: 'Adds a child node to a scene. Supports in-editor Undo/Redo when Godot editor is open!',
+        description: 'Adds a child node to a scene with optional properties and script. Supports in-editor Undo/Redo when Godot editor is open!',
         inputSchema: {
           type: 'object',
           properties: {
-            scene_path: { type: 'string' },
-            node_type: { type: 'string', description: 'Node class name' },
-            node_name: { type: 'string' },
-            parent_path: { type: 'string', description: 'Parent node path' },
+            scene_path: { type: 'string', description: 'Scene file path' },
+            node_type: { type: 'string', description: 'Node class name (e.g. Sprite2D, CollisionShape2D)' },
+            node_name: { type: 'string', description: 'Name for the new node' },
+            parent_path: { type: 'string', description: 'Parent node path (default ".")' },
+            properties: { type: 'object', description: 'Initial properties map to set on the new node' },
+            script_path: { type: 'string', description: 'Path to script (.gd) to attach to the new node' },
           },
           required: ['node_type'],
         },
       },
       {
         name: 'modify_node_properties',
-        description: 'Sets properties on a node with smart variant parsing (Vector2, Vector3, Color, Rect2, booleans, numbers).',
+        description: 'Sets properties on a node with smart variant parsing (Vector2, Vector3, Color, Rect2, Transform2D, Transform3D, Basis, Quaternion, Array, Dictionary).',
         inputSchema: {
           type: 'object',
           properties: {
             scene_path: { type: 'string' },
-            node_path: { type: 'string' },
+            node_path: { type: 'string', description: 'Node path in scene (default ".")' },
             properties: { type: 'object', description: 'Key-value map of properties to set' },
           },
           required: ['properties'],
@@ -368,7 +376,12 @@ class GodotMCPServer {
         description: 'Reparents a node to a new parent node.',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' }, node_path: { type: 'string' }, new_parent_path: { type: 'string' } },
+          properties: {
+            scene_path: { type: 'string' },
+            node_path: { type: 'string', description: 'Node path to move' },
+            new_parent_path: { type: 'string', description: 'Destination parent node path' },
+            keep_global_transform: { type: 'boolean', description: 'Whether to maintain global transform (default true)' },
+          },
           required: ['node_path', 'new_parent_path'],
         },
       },
@@ -377,16 +390,27 @@ class GodotMCPServer {
         description: 'Duplicates an existing node inside a scene.',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' }, node_path: { type: 'string' }, new_name: { type: 'string' } },
+          properties: {
+            scene_path: { type: 'string' },
+            node_path: { type: 'string', description: 'Node path to duplicate' },
+            new_name: { type: 'string', description: 'Optional name for the duplicated node' },
+            parent_path: { type: 'string', description: 'Optional parent node path to place duplicated node under' },
+          },
           required: ['node_path'],
         },
       },
       {
         name: 'inspect_node',
-        description: 'Returns all property values, attached scripts, and child node counts.',
+        description: 'Returns all property values, attached scripts, signals, groups, and child nodes of a node.',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' }, node_path: { type: 'string' } },
+          properties: {
+            scene_path: { type: 'string' },
+            node_path: { type: 'string', description: 'Node path in scene (default ".")' },
+            include_signals: { type: 'boolean', description: 'Whether to include signals list (default true)' },
+            include_groups: { type: 'boolean', description: 'Whether to include node groups (default true)' },
+            include_children: { type: 'boolean', description: 'Whether to include child nodes list (default true)' },
+          },
         },
       },
       {
@@ -394,18 +418,46 @@ class GodotMCPServer {
         description: 'Returns full hierarchical node tree of open editor scene or .tscn file.',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' } },
+          properties: {
+            scene_path: { type: 'string' },
+            max_depth: { type: 'number', description: 'Maximum depth of tree traversal (-1 for unlimited, default -1)' },
+            filter_type: { type: 'string', description: 'Filter nodes by class type (e.g. Sprite2D)' },
+          },
+        },
+      },
+      {
+        name: 'instantiate_scene',
+        description: 'Instantiates a sub-scene (.tscn) as a child node in a scene or active editor session.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string', description: 'Target scene file path (required for headless mode)' },
+            target_scene_path: { type: 'string', description: 'Path to .tscn scene file to instantiate' },
+            parent_path: { type: 'string', description: 'Parent node path (default ".")' },
+            node_name: { type: 'string', description: 'Optional custom name for instantiated root node' },
+            position: { description: 'Optional initial position (Vector2, Vector3, or dict {x, y} / {x, y, z})' },
+          },
+          required: ['target_scene_path'],
         },
       },
       {
         name: 'create_script',
-        description: 'Generates a new GDScript file.',
+        description: 'Generates a new GDScript file with optional class_name, signals, and methods.',
         inputSchema: {
           type: 'object',
           properties: {
-            script_path: { type: 'string' },
-            extends_class: { type: 'string' },
-            content: { type: 'string' },
+            script_path: { type: 'string', description: 'Target path (e.g. res://scripts/my_script.gd)' },
+            extends_class: { type: 'string', description: 'Class to extend (default: Node)' },
+            class_name: { type: 'string', description: 'Optional class_name declaration' },
+            content: { type: 'string', description: 'Raw GDScript code content' },
+            signals: {
+              type: 'array',
+              description: 'List of signal definitions: [{ name: "health_changed", args: ["new_hp"] }] or string names',
+            },
+            methods: {
+              type: 'array',
+              description: 'List of method definitions: [{ name: "take_damage", args: ["amount"], return_type: "void", content: "pass" }]',
+            },
           },
           required: ['script_path'],
         },
@@ -415,16 +467,25 @@ class GodotMCPServer {
         description: 'Attaches a script to a node in a scene.',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' }, node_path: { type: 'string' }, script_path: { type: 'string' } },
+          properties: {
+            script_path: { type: 'string', description: 'Path to script file (.gd)' },
+            node_path: { type: 'string', description: 'Node path in scene (default: ".")' },
+            scene_path: { type: 'string', description: 'Scene path (.tscn) for headless operation' },
+          },
           required: ['script_path'],
         },
       },
       {
         name: 'edit_script',
-        description: 'Edits code of a GDScript file and updates resource filesystem.',
+        description: 'Edits GDScript file content (full code or line range replacement).',
         inputSchema: {
           type: 'object',
-          properties: { script_path: { type: 'string' }, code: { type: 'string' } },
+          properties: {
+            script_path: { type: 'string', description: 'Path to GDScript file' },
+            code: { type: 'string', description: 'New GDScript code content or line replacement text' },
+            line_start: { type: 'number', description: '1-based starting line index for range replacement' },
+            line_end: { type: 'number', description: '1-based ending line index for range replacement' },
+          },
           required: ['script_path', 'code'],
         },
       },
@@ -433,8 +494,54 @@ class GodotMCPServer {
         description: 'Validates GDScript syntax and instantiability.',
         inputSchema: {
           type: 'object',
-          properties: { script_path: { type: 'string' } },
+          properties: {
+            script_path: { type: 'string', description: 'Path to GDScript file' },
+          },
           required: ['script_path'],
+        },
+      },
+      {
+        name: 'connect_signal',
+        description: 'Connects a signal from a source node to a target node method in a scene.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            signal_name: { type: 'string', description: 'Signal name (e.g. "pressed", "body_entered")' },
+            source_node_path: { type: 'string', description: 'Source node path emitting the signal' },
+            target_node_path: { type: 'string', description: 'Target node path receiving signal' },
+            target_method: { type: 'string', description: 'Target method name to call' },
+            binds: { type: 'array', description: 'Optional list of bound parameters' },
+            flags: { description: 'Connection flags (number or array of string names like ["deferred", "persist", "one_shot"])' },
+            scene_path: { type: 'string', description: 'Scene path for headless operation' },
+          },
+          required: ['signal_name', 'source_node_path', 'target_node_path', 'target_method'],
+        },
+      },
+      {
+        name: 'disconnect_signal',
+        description: 'Disconnects a signal between source and target nodes in a scene.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            signal_name: { type: 'string', description: 'Signal name' },
+            source_node_path: { type: 'string', description: 'Source node path' },
+            target_node_path: { type: 'string', description: 'Target node path' },
+            target_method: { type: 'string', description: 'Target method name' },
+            scene_path: { type: 'string', description: 'Scene path for headless operation' },
+          },
+          required: ['signal_name', 'source_node_path', 'target_node_path', 'target_method'],
+        },
+      },
+      {
+        name: 'list_signals',
+        description: 'Lists all available signals and active signal connections on a node.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            node_path: { type: 'string', description: 'Node path to inspect (default: ".")' },
+            scene_path: { type: 'string', description: 'Scene path for headless operation' },
+          },
+          required: ['node_path'],
         },
       },
       {
@@ -451,7 +558,11 @@ class GodotMCPServer {
         description: 'Exports 3D MeshInstance nodes to a MeshLibrary resource for GridMap usage.',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' }, output_path: { type: 'string' } },
+          properties: {
+            scene_path: { type: 'string', description: 'Source scene file path (.tscn)' },
+            output_path: { type: 'string', description: 'Output .tres or .meshlib resource file path' },
+            generate_collisions: { type: 'boolean', description: 'Whether to generate collision shapes for meshes (default: false)' },
+          },
           required: ['scene_path', 'output_path'],
         },
       },
@@ -460,14 +571,19 @@ class GodotMCPServer {
         description: 'Retrieves Godot 4.4+ file UID.',
         inputSchema: {
           type: 'object',
-          properties: { file_path: { type: 'string' } },
+          properties: { file_path: { type: 'string', description: 'Resource file path (e.g. res://icon.svg)' } },
           required: ['file_path'],
         },
       },
       {
         name: 'update_project_uids',
         description: 'Resaves resources to synchronize UIDs across Godot 4.4 project.',
-        inputSchema: { type: 'object', properties: {} },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            project_path: { type: 'string', description: 'Path to Godot project directory (default: current directory)' },
+          },
+        },
       },
       {
         name: 'add_input_action',
@@ -489,42 +605,155 @@ class GodotMCPServer {
       },
       {
         name: 'configure_physics_body',
-        description: 'Configures CollisionObject2D/3D physics body properties.',
+        description: 'Configures CollisionObject2D/3D physics body properties (CharacterBody, RigidBody, StaticBody, AnimatableBody, mass, friction, bounce, gravity_scale, collision_layer, collision_mask, is_3d).',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' }, node_path: { type: 'string' }, body_type: { type: 'string' } },
+          properties: {
+            scene_path: { type: 'string', description: 'Scene file path (for headless mode)' },
+            node_path: { type: 'string', description: 'Path to target physics body node' },
+            body_type: { type: 'string', description: 'Body type: CharacterBody2D/3D, RigidBody2D/3D, StaticBody2D/3D, AnimatableBody2D/3D' },
+            mass: { type: 'number', description: 'Mass for RigidBody2D/3D' },
+            friction: { type: 'number', description: 'Friction coefficient' },
+            bounce: { type: 'number', description: 'Bounciness / restitution coefficient' },
+            gravity_scale: { type: 'number', description: 'Gravity scale for RigidBody2D/3D' },
+            collision_layer: { type: 'number', description: 'Collision layer bitmask' },
+            collision_mask: { type: 'number', description: 'Collision mask bitmask' },
+            is_3d: { type: 'boolean', description: 'Whether this physics body is 3D' },
+          },
+          required: ['node_path'],
         },
       },
       {
         name: 'add_collision_shape',
-        description: 'Adds a CollisionShape2D or CollisionShape3D to a physics body.',
+        description: 'Adds a CollisionShape2D or CollisionShape3D with specified shape (Box, Sphere, Capsule, Cylinder, Rectangle, Circle, Segment, WorldBoundary, ConvexPolygon, ConcavePolygon) to a physics body.',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' }, parent_path: { type: 'string' }, shape_type: { type: 'string' } },
+          properties: {
+            scene_path: { type: 'string', description: 'Scene file path (for headless mode)' },
+            parent_path: { type: 'string', description: 'Parent physics body or node path' },
+            shape_type: { type: 'string', description: 'Shape type: Box, Sphere, Capsule, Cylinder, Rectangle, Circle, Segment, WorldBoundary, ConvexPolygon, ConcavePolygon' },
+            shape_params: { type: 'object', description: 'Shape parameters: size, radius, height, points, normal, d, etc.' },
+            node_name: { type: 'string', description: 'Name of collision shape node to create' },
+            is_3d: { type: 'boolean', description: 'Whether shape is 3D' },
+          },
+          required: ['parent_path', 'shape_type'],
         },
       },
       {
         name: 'configure_raycast',
-        description: 'Sets up RayCast2D or RayCast3D node parameters.',
+        description: 'Sets up RayCast2D or RayCast3D node parameters (target_position, collide_with_bodies, collide_with_areas, collision_mask, enabled, is_3d).',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' }, node_path: { type: 'string' }, target_position: { type: 'string' } },
+          properties: {
+            scene_path: { type: 'string', description: 'Scene file path (for headless mode)' },
+            node_path: { type: 'string', description: 'Path to RayCast node' },
+            target_position: { description: 'Target position vector: {x, y} or {x, y, z}' },
+            collide_with_bodies: { type: 'boolean', description: 'Whether raycast collides with physics bodies' },
+            collide_with_areas: { type: 'boolean', description: 'Whether raycast collides with Area nodes' },
+            collision_mask: { type: 'number', description: 'Collision mask bitmask' },
+            enabled: { type: 'boolean', description: 'Whether RayCast is enabled' },
+            is_3d: { type: 'boolean', description: 'Whether RayCast is 3D' },
+          },
+          required: ['node_path'],
+        },
+      },
+      {
+        name: 'configure_area',
+        description: 'Configures Area2D or Area3D node parameters (monitoring, monitorable, priority, gravity, collision_layer, collision_mask, is_3d).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string', description: 'Scene file path (for headless mode)' },
+            node_path: { type: 'string', description: 'Path to Area node' },
+            monitoring: { type: 'boolean', description: 'Whether area detects overlapping areas/bodies' },
+            monitorable: { type: 'boolean', description: 'Whether area can be detected by other areas' },
+            priority: { type: 'number', description: 'Area processing priority' },
+            gravity: { type: 'number', description: 'Area gravity acceleration override' },
+            collision_layer: { type: 'number', description: 'Collision layer bitmask' },
+            collision_mask: { type: 'number', description: 'Collision mask bitmask' },
+            is_3d: { type: 'boolean', description: 'Whether Area is 3D' },
+          },
+          required: ['node_path'],
         },
       },
       {
         name: 'create_ui_layout',
-        description: 'Builds UI layout containers and controls.',
+        description: 'Builds UI layout containers and controls with layout presets.',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' }, layout_type: { type: 'string' } },
+          properties: {
+            scene_path: { type: 'string', description: 'Path to scene file (.tscn)' },
+            parent_path: { type: 'string', description: 'Parent node path in scene (default: root)' },
+            container_type: { type: 'string', description: 'Container class type (VBoxContainer, HBoxContainer, GridContainer, MarginContainer, PanelContainer, ScrollContainer, etc.)' },
+            container_name: { type: 'string', description: 'Name of the container node' },
+            layout_preset: { type: 'string', description: 'Layout preset (FullRect, Center, TopLeft, BottomRight, TopRight, BottomLeft, TopWide, BottomWide, LeftWide, RightWide, HCenterWide, VCenterWide, Wide, etc. or integer enum)' },
+            controls_to_add: {
+              type: 'array',
+              description: 'List of controls to add (string names like "Button" or objects with {type, name, text, properties})',
+            },
+          },
         },
       },
       {
         name: 'apply_theme',
-        description: 'Applies Theme resource or overrides font/color properties.',
+        description: 'Applies a Theme resource to a target node in a scene.',
         inputSchema: {
           type: 'object',
-          properties: { scene_path: { type: 'string' }, node_path: { type: 'string' }, theme_path: { type: 'string' } },
+          properties: {
+            scene_path: { type: 'string', description: 'Path to scene file (.tscn)' },
+            theme_path: { type: 'string', description: 'Path to Theme resource file (.theme or .tres)' },
+            target_node_path: { type: 'string', description: 'Path to target Control node (default: root)' },
+            node_path: { type: 'string', description: 'Alias for target_node_path' },
+          },
+          required: ['theme_path'],
+        },
+      },
+      {
+        name: 'configure_control_anchors',
+        description: 'Configures Control node layout presets, anchors, and offsets.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string', description: 'Path to scene file (.tscn)' },
+            node_path: { type: 'string', description: 'Path to target Control node' },
+            anchor_preset: { type: 'string', description: 'Layout preset (FullRect, Center, TopLeft, BottomRight, TopRight, BottomLeft, TopWide, BottomWide, LeftWide, RightWide, HCenterWide, VCenterWide, Wide, etc. or integer enum)' },
+            custom_anchors: {
+              type: 'object',
+              description: 'Custom anchor values { left, top, right, bottom } (0.0 to 1.0)',
+              properties: {
+                left: { type: 'number' },
+                top: { type: 'number' },
+                right: { type: 'number' },
+                bottom: { type: 'number' },
+              },
+            },
+            custom_offsets: {
+              type: 'object',
+              description: 'Custom offset values { left, top, right, bottom } in pixels',
+              properties: {
+                left: { type: 'number' },
+                top: { type: 'number' },
+                right: { type: 'number' },
+                bottom: { type: 'number' },
+              },
+            },
+          },
+          required: ['node_path'],
+        },
+      },
+      {
+        name: 'set_control_theme_override',
+        description: 'Sets a theme override (color, font, font_size, constant, stylebox) on a Control node.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string', description: 'Path to scene file (.tscn)' },
+            node_path: { type: 'string', description: 'Path to target Control node' },
+            override_type: { type: 'string', description: 'Type of override: "color", "font", "font_size", "constant", "stylebox"' },
+            override_name: { type: 'string', description: 'Name of theme override property (e.g. font_color, font_size, separation, panel)' },
+            value: { description: 'Value for override (Color hex/dict, Font path, number for font_size/constant, StyleBox path/dict, or null/empty to clear)' },
+          },
+          required: ['node_path', 'override_type', 'override_name'],
         },
       },
       {
@@ -597,10 +826,36 @@ class GodotMCPServer {
       },
       {
         name: 'configure_audio_bus',
-        description: 'Adds or configures audio buses and stream players.',
+        description: 'Creates or updates AudioServer audio buses, volume, send bus, and audio effects.',
         inputSchema: {
           type: 'object',
-          properties: { bus_name: { type: 'string' } },
+          properties: {
+            bus_name: { type: 'string', description: 'Audio bus name (e.g. "Master", "Music", "SFX")' },
+            volume_db: { type: 'number', description: 'Bus volume in decibels (dB)' },
+            send_bus: { type: 'string', description: 'Name of bus to send audio output to' },
+            add_effect: { description: 'Audio effect class name or boolean (e.g. "AudioEffectReverb")' },
+            effect_type: { type: 'string', description: 'Audio effect class name' },
+          },
+          required: ['bus_name'],
+        },
+      },
+      {
+        name: 'create_audio_stream_player',
+        description: 'Creates an AudioStreamPlayer, AudioStreamPlayer2D, or AudioStreamPlayer3D node in a scene.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            stream_path: { type: 'string', description: 'Path to audio stream file (.wav, .ogg, .mp3)' },
+            bus_name: { type: 'string', description: 'Target audio bus name (default: "Master")' },
+            autoplay: { type: 'boolean', description: 'Whether audio auto-plays on ready' },
+            volume_db: { type: 'number', description: 'Volume in decibels (dB)' },
+            pitch_scale: { type: 'number', description: 'Pitch scale factor' },
+            is_3d: { type: 'boolean', description: 'Create AudioStreamPlayer3D node' },
+            is_2d: { type: 'boolean', description: 'Create AudioStreamPlayer2D node' },
+            scene_path: { type: 'string', description: 'Scene path for headless operation' },
+            parent_path: { type: 'string', description: 'Parent node path (default: ".")' },
+            node_name: { type: 'string', description: 'Name for audio player node' },
+          },
         },
       },
       {
@@ -613,16 +868,33 @@ class GodotMCPServer {
       },
       {
         name: 'simulate_input',
-        description: 'Simulates playtest input events (key press, mouse click, action).',
+        description: 'Simulates playtest input events (key press, mouse click, mouse motion, action).',
         inputSchema: {
           type: 'object',
-          properties: { action: { type: 'string' }, type: { type: 'string' }, pressed: { type: 'boolean' } },
+          properties: {
+            action: { type: 'string', description: 'Input action name (for event_type: action)' },
+            event_type: { type: 'string', description: 'Event type: action, key, mouse_button, mouse_motion' },
+            type: { type: 'string', description: 'Alias for event_type' },
+            pressed: { type: 'boolean', description: 'Pressed state (default: true)' },
+            key_code: { type: 'any', description: 'Key code (number or key name string like "Space", "KEY_A", 32)' },
+            mouse_button_index: { type: 'number', description: 'Mouse button index (1=Left, 2=Right, 3=Middle, 4=WheelUp, 5=WheelDown)' },
+            position: { type: 'object', description: '{x, y} position vector for mouse events' },
+            relative_motion: { type: 'object', description: '{x, y} relative motion vector for mouse_motion' },
+          },
         },
       },
       {
         name: 'take_screenshot',
-        description: 'Captures viewport screenshot from active Godot editor window as Base64 image.',
-        inputSchema: { type: 'object', properties: {} },
+        description: 'Captures viewport screenshot from active Godot editor window or running application as Base64 image.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            format: { type: 'string', description: 'Image format: png or jpg (default: png)' },
+            max_width: { type: 'number', description: 'Maximum image width for downscaling' },
+            max_height: { type: 'number', description: 'Maximum image height for downscaling' },
+            quality: { type: 'number', description: 'JPEG quality float 0.0-1.0 or int 1-100 (default: 0.75)' },
+          },
+        },
       },
       {
         name: 'run_unit_tests',
