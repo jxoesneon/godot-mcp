@@ -710,6 +710,76 @@ class GodotMCPServer {
           required: ['node_path'],
         },
       },
+      {
+        name: 'create_animation',
+        description: 'Creates Animation resource with length, step, and loop mode.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            animation_path: { type: 'string', description: 'Path to save standalone .tres Animation resource' },
+            scene_path: { type: 'string', description: 'Path to scene file' },
+            animation_player_path: { type: 'string', description: 'Path to AnimationPlayer node in scene' },
+            animation_name: { type: 'string', description: 'Name of the animation' },
+            length: { type: 'number', description: 'Animation length in seconds' },
+            step: { type: 'number', description: 'Animation step in seconds' },
+            loop_mode: { type: 'string', description: 'Loop mode: "none", "linear", "pingpong"' },
+          },
+        },
+      },
+      {
+        name: 'add_animation_track',
+        description: 'Adds value, transform, or method tracks to an Animation.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            animation_path: { type: 'string' },
+            scene_path: { type: 'string' },
+            animation_player_path: { type: 'string' },
+            animation_name: { type: 'string' },
+            track_type: { type: 'string', description: 'Track type: "value", "position_3d", "rotation_3d", "scale_3d", "transform", "method", "bezier"' },
+            track_path: { type: 'string', description: 'Node or property path (e.g. "Sprite2D:position" or "Player:play_sound")' },
+            interpolation_type: { type: 'string', description: 'Interpolation: "nearest", "linear", "cubic"' },
+            update_mode: { type: 'string', description: 'Update mode for value track: "continuous", "discrete", "capture"' },
+          },
+        },
+      },
+      {
+        name: 'insert_animation_keyframe',
+        description: 'Inserts keyframe at specified time in an Animation track.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            animation_path: { type: 'string' },
+            scene_path: { type: 'string' },
+            animation_player_path: { type: 'string' },
+            animation_name: { type: 'string' },
+            track_index: { type: 'number' },
+            track_path: { type: 'string' },
+            time: { type: 'number', description: 'Time in seconds' },
+            value: { description: 'Keyframe value (number, vector dict, color dict, or method dict)' },
+            transition: { type: 'number', description: 'Transition/easing value' },
+          },
+        },
+      },
+      {
+        name: 'configure_animation_tree',
+        description: 'Sets up AnimationTree state machines and blend trees.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string' },
+            animation_tree_path: { type: 'string' },
+            animation_player_path: { type: 'string' },
+            tree_type: { type: 'string', description: 'Tree type: "state_machine", "blend_tree", "blend_space_2d", "blend_space_1d"' },
+            active: { type: 'boolean' },
+            states: { type: 'array', description: 'States array for state machine' },
+            transitions: { type: 'array', description: 'Transitions array for state machine' },
+            start_node: { type: 'string', description: 'Start node name' },
+            blend_nodes: { type: 'array', description: 'Blend nodes array for blend tree' },
+            connections: { type: 'array', description: 'Connections array for blend tree' },
+          },
+        },
+      },
     ];
   }
 

@@ -120,6 +120,14 @@ func process_command(cmd: String, params: Dictionary) -> Dictionary:
             return configure_navigation_region_in_editor(params)
         "set_gridmap_cell":
             return set_gridmap_cell_in_editor(params)
+        "create_animation":
+            return create_animation_in_editor(params)
+        "add_animation_track":
+            return add_animation_track_in_editor(params)
+        "insert_animation_keyframe":
+            return insert_animation_keyframe_in_editor(params)
+        "configure_animation_tree":
+            return configure_animation_tree_in_editor(params)
         _:
             return {"status": "error", "error": "Unknown in-editor command: " + cmd}
 
@@ -804,6 +812,336 @@ func parse_vector3i(val, default_val: Vector3i = Vector3i.ZERO) -> Vector3i:
         return Vector3i(int(val[0]), int(val[1]), int(val[2]))
     return default_val
 
+func find_first_node_of_class(parent: Node, target_class: String) -> Node:
+    if parent.is_class(target_class) or parent.get_class() == target_class:
+        return parent
+    for child in parent.get_children():
+        var found = find_first_node_of_class(child, target_class)
+        if found:
+            return found
+    return null
+
+func parse_track_type(type_val) -> int:
+    if typeof(type_val) == TYPE_INT:
+        return type_val
+    var s = String(type_val).to_lower()
+    match s:
+        "value", "transform": return Animation.TYPE_VALUE
+        "position_3d", "position": return Animation.TYPE_POSITION_3D
+        "rotation_3d", "rotation": return Animation.TYPE_ROTATION_3D
+        "scale_3d", "scale": return Animation.TYPE_SCALE_3D
+        "blend_shape": return Animation.TYPE_BLEND_SHAPE
+        "method": return Animation.TYPE_METHOD
+        "bezier": return Animation.TYPE_BEZIER
+        "audio": return Animation.TYPE_AUDIO
+        "animation": return Animation.TYPE_ANIMATION
+        _: return Animation.TYPE_VALUE
+
+func get_animation_in_editor(params: Dictionary) -> Dictionary:
+    var anim_path = params.get("animation_path", "")
+    var anim_player_path = params.get("animation_player_path", params.get("anim_player_path", "AnimationPlayer"))
+    var anim_name = params.get("animation_name", "new_animation")
+
+    if anim_path != "" and FileAccess.file_exists(anim_path):
+        var anim = ResourceLoader.load(anim_path) as Animation
+        if anim:
+            return {"anim": anim, "anim_path": anim_path, "type": "resource"}
+
+    var root = editor_interface.get_edited_scene_root() if editor_interface else null
+    if root:
+        var player = root if anim_player_path == "." else root.get_node_or_null(anim_player_path)
+        if not player or not (player is AnimationPlayer):
+            player = find_first_node_of_class(root, "AnimationPlayer")
+        if player and player is AnimationPlayer:
+            if player.has_animation_library(""):
+                var lib = player.get_animation_library("")
+                if lib.has_animation(anim_name):
+                    return {"anim": lib.get_animation(anim_name), "player": player, "anim_name": anim_name, "type": "editor_scene"}
+
+    return {}
+
+func save_modified_animation_in_editor(anim_ctx: Dictionary):
+    var anim = anim_ctx.get("anim") as Animation
+    if not anim: return
+    
+    if anim_ctx.get("type") == "resource" or anim_ctx.has("anim_path"):
+        ResourceSaver.save(anim, anim_ctx["anim_path"])
+        if editor_interface:
+            editor_interface.get_resource_filesystem().scan()
+
+func create_animation_in_editor(params: Dictionary) -> Dictionary:
+    var anim_path = params.get("animation_path", "")
+    var anim_player_path = params.get("animation_player_path", "AnimationPlayer")
+    var anim_name = params.get("animation_name", "new_animation")
+    var length = float(params.get("length", 1.0))
+    var step = float(params.get("step", 0.1))
+    var loop_val = params.get("loop_mode", 0)
+
+    var anim = Animation.new()
+    anim.length = length
+    anim.step = step
+
+    if typeof(loop_val) == TYPE_STRING:
+        match String(loop_val).to_lower():
+            "linear": anim.loop_mode = Animation.LOOP_LINEAR
+            "pingpong": anim.loop_mode = Animation.LOOP_PINGPONG
+            _: anim.loop_mode = Animation.LOOP_NONE
+    else:
+        anim.loop_mode = int(loop_val)
+
+    if anim_path != "":
+        var err = ResourceSaver.save(anim, anim_path)
+        if err != OK:
+            return {"status": "error", "error": "Failed to save animation resource: %d" % err}
+        if editor_interface:
+            editor_interface.get_resource_filesystem().scan()
+
+    var root = editor_interface.get_edited_scene_root() if editor_interface else null
+    if root:
+        var player = root if anim_player_path == "." else root.get_node_or_null(anim_player_path)
+        if not player or not (player is AnimationPlayer):
+            player = find_first_node_of_class(root, "AnimationPlayer")
+        if player and player is AnimationPlayer:
+            var lib: AnimationLibrary
+            if player.has_animation_library(""):
+                lib = player.get_animation_library("")
+            else:
+                lib = AnimationLibrary.new()
+                player.add_animation_library("", lib)
+            if lib.has_animation(anim_name):
+                lib.remove_animation(anim_name)
+            lib.add_animation(anim_name, anim)
+
+    return {
+        "status": "ok",
+        "result": {
+            "animation_name": anim_name,
+            "length": anim.length,
+            "step": anim.step,
+            "loop_mode": anim.loop_mode,
+            "animation_path": anim_path
+        }
+    }
+
+func add_animation_track_in_editor(params: Dictionary) -> Dictionary:
+    var anim_ctx = get_animation_in_editor(params)
+    if anim_ctx.is_empty():
+        return {"status": "error", "error": "Animation not found in editor"}
+
+    var anim = anim_ctx["anim"] as Animation
+    var track_type_val = params.get("track_type", "value")
+    var ttype = parse_track_type(track_type_val)
+    var track_path_str = params.get("track_path", params.get("node_path", params.get("property_path", "")))
+
+    var track_idx = anim.add_track(ttype)
+    if track_path_str != "":
+        anim.track_set_path(track_idx, NodePath(track_path_str))
+
+    if params.has("interpolation_type"):
+        var interp = params["interpolation_type"]
+        if typeof(interp) == TYPE_STRING:
+            match String(interp).to_lower():
+                "nearest": anim.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_NEAREST)
+                "linear": anim.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_LINEAR)
+                "cubic": anim.track_set_interpolation_type(track_idx, Animation.INTERPOLATION_CUBIC)
+        else:
+            anim.track_set_interpolation_type(track_idx, int(interp))
+
+    if ttype == Animation.TYPE_VALUE and params.has("update_mode"):
+        var upmode = params["update_mode"]
+        if typeof(upmode) == TYPE_STRING:
+            match String(upmode).to_lower():
+                "continuous": anim.value_track_set_update_mode(track_idx, Animation.UPDATE_CONTINUOUS)
+                "discrete": anim.value_track_set_update_mode(track_idx, Animation.UPDATE_DISCRETE)
+                "capture": anim.value_track_set_update_mode(track_idx, Animation.UPDATE_CAPTURE)
+        else:
+            anim.value_track_set_update_mode(track_idx, int(upmode))
+
+    save_modified_animation_in_editor(anim_ctx)
+
+    return {
+        "status": "ok",
+        "result": {
+            "track_index": track_idx,
+            "track_type": ttype,
+            "track_path": track_path_str
+        }
+    }
+
+func insert_animation_keyframe_in_editor(params: Dictionary) -> Dictionary:
+    var anim_ctx = get_animation_in_editor(params)
+    if anim_ctx.is_empty():
+        return {"status": "error", "error": "Animation not found in editor"}
+
+    var anim = anim_ctx["anim"] as Animation
+    var track_idx = params.get("track_index", -1)
+    var track_path_str = params.get("track_path", "")
+
+    if track_idx == -1 and track_path_str != "":
+        var target_np = NodePath(track_path_str)
+        for i in range(anim.get_track_count()):
+            if anim.track_get_path(i) == target_np:
+                track_idx = i
+                break
+
+    if track_idx < 0 or track_idx >= anim.get_track_count():
+        return {"status": "error", "error": "Invalid track_index (%d) or track_path not found" % track_idx}
+
+    var time = float(params.get("time", 0.0))
+    var raw_value = params.get("value", null)
+    var parsed_val = parse_variant(raw_value)
+    var transition = float(params.get("transition", 1.0))
+
+    var ttype = anim.track_get_type(track_idx)
+    var key_idx = -1
+
+    if ttype == Animation.TYPE_METHOD:
+        var method_data = {}
+        if typeof(parsed_val) == TYPE_DICTIONARY:
+            method_data = {
+                "method": parsed_val.get("method", ""),
+                "args": parsed_val.get("args", [])
+            }
+        else:
+            method_data = {"method": String(parsed_val), "args": []}
+        key_idx = anim.track_insert_key(track_idx, time, method_data)
+    elif ttype == Animation.TYPE_POSITION_3D or ttype == Animation.TYPE_SCALE_3D:
+        if typeof(parsed_val) != TYPE_VECTOR3 and typeof(parsed_val) == TYPE_DICTIONARY:
+            parsed_val = Vector3(parsed_val.get("x", 0), parsed_val.get("y", 0), parsed_val.get("z", 0))
+        key_idx = anim.track_insert_key(track_idx, time, parsed_val, transition)
+    elif ttype == Animation.TYPE_ROTATION_3D:
+        if typeof(parsed_val) != TYPE_QUATERNION and typeof(parsed_val) == TYPE_DICTIONARY:
+            parsed_val = Quaternion(parsed_val.get("x", 0), parsed_val.get("y", 0), parsed_val.get("z", 0), parsed_val.get("w", 1))
+        key_idx = anim.track_insert_key(track_idx, time, parsed_val, transition)
+    else:
+        key_idx = anim.track_insert_key(track_idx, time, parsed_val, transition)
+
+    save_modified_animation_in_editor(anim_ctx)
+
+    return {
+        "status": "ok",
+        "result": {
+            "track_index": track_idx,
+            "time": time,
+            "key_index": key_idx,
+            "value": String(parsed_val)
+        }
+    }
+
+func configure_animation_tree_in_editor(params: Dictionary) -> Dictionary:
+    var root = editor_interface.get_edited_scene_root() if editor_interface else null
+    if not root:
+        return {"status": "error", "error": "No active scene open in editor"}
+
+    var anim_tree_path = params.get("animation_tree_path", params.get("node_path", "AnimationTree"))
+    var anim_player_path = params.get("animation_player_path", params.get("anim_player_path", "AnimationPlayer"))
+    var tree_type = params.get("tree_type", "AnimationNodeStateMachine")
+    var active = params.get("active", true)
+
+    var tree_node = root if anim_tree_path == "." else root.get_node_or_null(anim_tree_path)
+
+    if not tree_node:
+        tree_node = AnimationTree.new()
+        tree_node.name = "AnimationTree"
+        if undo_redo_manager:
+            undo_redo_manager.create_action("Add AnimationTree")
+            undo_redo_manager.add_do_method(root, "add_child", tree_node)
+            undo_redo_manager.add_do_method(tree_node, "set_owner", root)
+            undo_redo_manager.add_do_reference(tree_node)
+            undo_redo_manager.add_undo_method(root, "remove_child", tree_node)
+            undo_redo_manager.commit_action()
+        else:
+            root.add_child(tree_node)
+            tree_node.owner = root
+    elif not (tree_node is AnimationTree):
+        return {"status": "error", "error": "Target node is not an AnimationTree: " + anim_tree_path}
+
+    var anim_tree = tree_node as AnimationTree
+    anim_tree.anim_player = NodePath(anim_player_path)
+    anim_tree.active = active
+
+    var tree_type_str = String(tree_type).to_lower()
+    if tree_type_str == "state_machine" or tree_type_str == "animationnodestatemachine":
+        var state_machine = AnimationNodeStateMachine.new()
+        var states = params.get("states", [])
+        for s in states:
+            var s_name = ""
+            var anim_name = ""
+            if typeof(s) == TYPE_STRING:
+                s_name = s
+                anim_name = s
+            elif typeof(s) == TYPE_DICTIONARY:
+                s_name = s.get("name", "")
+                anim_name = s.get("animation", s_name)
+            if s_name != "":
+                var anim_node = AnimationNodeAnimation.new()
+                anim_node.animation = anim_name
+                state_machine.add_node(s_name, anim_node)
+
+        var transitions = params.get("transitions", [])
+        for t in transitions:
+            if typeof(t) == TYPE_DICTIONARY:
+                var from_n = t.get("from", "")
+                var to_n = t.get("to", "")
+                if from_n != "" and to_n != "":
+                    var trans = AnimationNodeStateMachineTransition.new()
+                    if t.has("switch_mode"):
+                        trans.switch_mode = int(t["switch_mode"])
+                    if t.has("advance_mode"):
+                        trans.advance_mode = int(t["advance_mode"])
+                    elif t.get("auto_advance", false):
+                        trans.advance_mode = AnimationNodeStateMachineTransition.ADVANCE_MODE_AUTO
+                    state_machine.add_transition(from_n, to_n, trans)
+
+        var start_node = params.get("start_node", "")
+        if start_node != "":
+            var start_trans = AnimationNodeStateMachineTransition.new()
+            start_trans.advance_mode = AnimationNodeStateMachineTransition.ADVANCE_MODE_AUTO
+            state_machine.add_transition("Start", start_node, start_trans)
+
+        anim_tree.tree_root = state_machine
+
+    elif tree_type_str == "blend_tree" or tree_type_str == "animationnodeblendtree":
+        var blend_tree = AnimationNodeBlendTree.new()
+        var blend_nodes = params.get("blend_nodes", [])
+        for bn in blend_nodes:
+            if typeof(bn) == TYPE_DICTIONARY:
+                var b_name = bn.get("name", "")
+                var b_type = bn.get("type", "AnimationNodeAnimation")
+                var anim_name = bn.get("animation", "")
+                if b_name != "" and ClassDB.class_exists(b_type):
+                    var node_inst = ClassDB.instantiate(b_type)
+                    if node_inst is AnimationNodeAnimation and anim_name != "":
+                        node_inst.animation = anim_name
+                    blend_tree.add_node(b_name, node_inst)
+
+        var connections = params.get("connections", [])
+        for conn in connections:
+            if typeof(conn) == TYPE_DICTIONARY:
+                var from_node = conn.get("from_node", "")
+                var to_node = conn.get("to_node", "output")
+                var to_input = conn.get("to_input", 0)
+                if from_node != "" and to_node != "":
+                    blend_tree.connect_node(to_node, to_input, from_node)
+
+        anim_tree.tree_root = blend_tree
+
+    elif tree_type_str == "blend_space_2d" or tree_type_str == "animationnodeblendspace2d":
+        anim_tree.tree_root = AnimationNodeBlendSpace2D.new()
+
+    elif tree_type_str == "blend_space_1d" or tree_type_str == "animationnodeblendspace1d":
+        anim_tree.tree_root = AnimationNodeBlendSpace1D.new()
+
+    return {
+        "status": "ok",
+        "result": {
+            "animation_tree_path": String(anim_tree.get_path()),
+            "anim_player": String(anim_tree.anim_player),
+            "tree_type": tree_type,
+            "active": anim_tree.active
+        }
+    }
+
 func parse_variant(val):
     if typeof(val) == TYPE_DICTIONARY:
         if val.has("__type"):
@@ -813,8 +1151,12 @@ func parse_variant(val):
                 "Vector2i": return Vector2i(int(val.get("x", 0)), int(val.get("y", 0)))
                 "Vector3": return Vector3(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("z", 0)))
                 "Vector3i": return Vector3i(int(val.get("x", 0)), int(val.get("y", 0)), int(val.get("z", 0)))
+                "Vector4": return Vector4(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("z", 0)), float(val.get("w", 0)))
+                "Quaternion": return Quaternion(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("z", 0)), float(val.get("w", 1)))
                 "Color": return Color(float(val.get("r", 0)), float(val.get("g", 0)), float(val.get("b", 0)), float(val.get("a", 1)))
                 "Rect2": return Rect2(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("width", 0)), float(val.get("height", 0)))
+        elif val.has("x") and val.has("y") and val.has("z") and val.has("w"):
+            return Quaternion(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("z", 0)), float(val.get("w", 1)))
         elif val.has("x") and val.has("y") and val.has("z"):
             return Vector3(float(val.get("x", 0)), float(val.get("y", 0)), float(val.get("z", 0)))
         elif val.has("x") and val.has("y"):
