@@ -572,6 +572,44 @@ class GodotMCPServer {
         description: 'Captures viewport screenshot from active Godot editor window as Base64 image.',
         inputSchema: { type: 'object', properties: {} },
       },
+      {
+        name: 'run_unit_tests',
+        description: 'Executes GUT (Godot Unit Testing) tests headlessly and returns test results report.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            project_path: { type: 'string', description: 'Path to Godot project directory' },
+            test_dir: { type: 'string', description: 'Directory containing GUT unit tests (default: res://test/unit)' },
+            prefix: { type: 'string', description: 'Prefix for test files (default: test_)' },
+            select_script: { type: 'string', description: 'Optional specific test script to run' },
+          },
+        },
+      },
+      {
+        name: 'add_autoload',
+        description: 'Adds an Autoload singleton script or scene to project.godot.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            project_path: { type: 'string', description: 'Path to Godot project directory' },
+            name: { type: 'string', description: 'Name of the Autoload singleton' },
+            path: { type: 'string', description: 'Resource path to script or scene (e.g. res://scripts/global.gd)' },
+          },
+          required: ['name', 'path'],
+        },
+      },
+      {
+        name: 'remove_autoload',
+        description: 'Removes an Autoload singleton from project.godot.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            project_path: { type: 'string', description: 'Path to Godot project directory' },
+            name: { type: 'string', description: 'Name of the Autoload singleton to remove' },
+          },
+          required: ['name'],
+        },
+      },
     ];
   }
 

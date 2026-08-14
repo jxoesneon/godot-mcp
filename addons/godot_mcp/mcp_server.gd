@@ -108,6 +108,12 @@ func process_command(cmd: String, params: Dictionary) -> Dictionary:
             return simulate_input_event(params)
         "take_screenshot":
             return take_viewport_screenshot()
+        "create_shader_material":
+            return create_shader_material_in_editor(params)
+        "set_shader_parameter":
+            return set_shader_parameter_in_editor(params)
+        "create_visual_shader":
+            return create_visual_shader_in_editor(params)
         _:
             return {"status": "error", "error": "Unknown in-editor command: " + cmd}
 
