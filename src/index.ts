@@ -501,6 +501,29 @@ class GodotMCPServer {
         },
       },
       {
+        name: 'analyze_gdscript_ast',
+        description: 'Parses GDScript file or raw code and extracts AST structure: exported variables, function signatures, signal definitions, inner classes, extends, and class_name.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            script_path: { type: 'string', description: 'Path to GDScript file (e.g. res://scripts/player.gd)' },
+            code: { type: 'string', description: 'Raw GDScript code content to analyze directly' },
+          },
+        },
+      },
+      {
+        name: 'find_script_references',
+        description: 'Scans project directory (.tscn, .tres, .gd) for occurrences and dependencies referencing a target script or scene path.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            target_path: { type: 'string', description: 'Target script or scene resource path (e.g. res://scripts/player.gd or res://scenes/main.tscn)' },
+            project_path: { type: 'string', description: 'Path to Godot project directory or subfolder (default: res://)' },
+          },
+          required: ['target_path'],
+        },
+      },
+      {
         name: 'connect_signal',
         description: 'Connects a signal from a source node to a target node method in a scene.',
         inputSchema: {
@@ -564,6 +587,24 @@ class GodotMCPServer {
             generate_collisions: { type: 'boolean', description: 'Whether to generate collision shapes for meshes (default: false)' },
           },
           required: ['scene_path', 'output_path'],
+        },
+      },
+      {
+        name: 'import_asset',
+        description: 'Triggers reimport of assets (GLTF, GLB, OBJ, PNG, WAV, OGG) with custom import settings (collision generation mode, scale, animation loop, compressed VRAM formats). Updates asset .import ConfigFile.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            asset_path: { type: 'string', description: 'Target asset file path (e.g. res://models/player.glb or res://textures/icon.png)' },
+            collision_mode: { type: 'string', description: 'Collision generation mode for 3D models ("none", "trimesh", "convex", "static")' },
+            scale: { type: 'number', description: 'Root/mesh scale factor for 3D models (e.g. 1.0, 0.01)' },
+            animation_loop: { type: 'boolean', description: 'Enable/disable animation loop for 3D models or audio' },
+            loop_mode: { type: 'string', description: 'Animation or audio loop mode ("none", "linear", "pingpong", "forward", "backward")' },
+            compressed_vram: { type: 'boolean', description: 'Enable/disable compressed VRAM texture format (compress/mode = 2)' },
+            compress_mode: { description: 'Texture compression mode ("lossless", "lossy", "vram_compressed", "vram_uncompressed", "basis_universal" or 0-4)' },
+            import_settings: { type: 'object', description: 'Key-value dictionary of custom import settings under [params] section in .import file' },
+          },
+          required: ['asset_path'],
         },
       },
       {
@@ -884,6 +925,39 @@ class GodotMCPServer {
         },
       },
       {
+        name: 'replay_input_sequence',
+        description: 'Replays a sequence of timestamped or step-based input actions for automated QA playtesting. Simulates input actions, keys, mouse events, or delays and returns playtest log and screenshot status.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            sequence: {
+              type: 'array',
+              description: 'Array of input event steps: [{ type: "action", action: "move_right", duration: 0.5 }, { type: "key", key_code: "Space", pressed: true }, { type: "delay", duration: 1.0 }]',
+              items: {
+                type: 'object',
+                properties: {
+                  type: { type: 'string', description: 'Event type: action, key, mouse_button, mouse_motion, delay' },
+                  action: { type: 'string', description: 'Action name for action events' },
+                  key_code: { description: 'Key code or name (e.g. "Space", "KEY_A", 32)' },
+                  pressed: { type: 'boolean', description: 'Pressed state (default: true)' },
+                  duration: { type: 'number', description: 'Duration to hold or wait in seconds' },
+                  timestamp: { type: 'number', description: 'Optional relative timestamp in seconds' },
+                  mouse_button_index: { type: 'number', description: 'Mouse button index (1=Left, 2=Right, 3=Middle)' },
+                  position: { type: 'object', description: '{x, y} position vector for mouse events' },
+                  relative_motion: { type: 'object', description: '{x, y} relative motion vector for mouse_motion' },
+                },
+              },
+            },
+            take_screenshot: { type: 'boolean', description: 'Whether to capture screenshot after sequence execution (default: true)' },
+            format: { type: 'string', description: 'Screenshot format: png or jpg (default: png)' },
+            max_width: { type: 'number', description: 'Maximum width for screenshot downscaling' },
+            max_height: { type: 'number', description: 'Maximum height for screenshot downscaling' },
+            quality: { type: 'number', description: 'JPEG quality for screenshot (0.0 - 1.0)' },
+          },
+          required: ['sequence'],
+        },
+      },
+      {
         name: 'take_screenshot',
         description: 'Captures viewport screenshot from active Godot editor window or running application as Base64 image.',
         inputSchema: {
@@ -1049,6 +1123,66 @@ class GodotMCPServer {
             start_node: { type: 'string', description: 'Start node name' },
             blend_nodes: { type: 'array', description: 'Blend nodes array for blend tree' },
             connections: { type: 'array', description: 'Connections array for blend tree' },
+          },
+        },
+      },
+      {
+        name: 'get_performance_metrics',
+        description: 'Queries live Godot engine performance metrics (FPS, frame times, static & video memory, node/object counts, draw calls, and physics 2D/3D active objects and collision pairs) using Performance.get_monitor().',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            project_path: { type: 'string', description: 'Optional project directory path (for headless execution fallback)' },
+            scene_path: { type: 'string', description: 'Optional scene path (for headless execution fallback)' },
+          },
+        },
+      },
+      {
+        name: 'get_memory_breakdown',
+        description: 'Queries detailed Godot engine memory breakdown categorized into static RAM, video memory (VRAM), object/node/resource allocations, and aggregate memory summaries.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            project_path: { type: 'string', description: 'Optional project directory path (for headless execution fallback)' },
+            scene_path: { type: 'string', description: 'Optional scene path (for headless execution fallback)' },
+          },
+        },
+      },
+      {
+        name: 'create_behavior_tree',
+        description: 'Generates behavior tree node hierarchies (Sequence, Selector, Inverter, LimboAI or standard Node structures) with action/condition scripts.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string', description: 'Target .tscn scene file path (optional)' },
+            parent_path: { type: 'string', description: 'Parent node path in scene (default: ".")' },
+            root_type: { type: 'string', description: 'Class or node type of BT root node (e.g. BTPlayer, BehaviorTree, BTSequence, BTSelector, Node; default: Node)' },
+            root_name: { type: 'string', description: 'Name of root node for behavior tree (default: BehaviorTree)' },
+            tree_type: { type: 'string', description: 'Behavior tree style: "limbo_ai" or "standard" (default: "standard")' },
+            nodes: {
+              type: 'array',
+              description: 'Array of behavior tree node definitions with name, type (Sequence, Selector, Inverter, Action, Condition, BTSequence, etc.), script_path, script_content, properties, and children array',
+              items: { type: 'object' },
+            },
+          },
+        },
+      },
+      {
+        name: 'configure_blackboard',
+        description: 'Configures Blackboard variables and initial dictionary parameters for AI agents.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string', description: 'Target .tscn scene file path (optional)' },
+            node_path: { type: 'string', description: 'Target node path containing or to contain Blackboard (default: ".")' },
+            blackboard_name: { type: 'string', description: 'Name of Blackboard node if creating a component (default: Blackboard)' },
+            variables: { type: 'object', description: 'Dictionary of blackboard variables and initial values' },
+            blackboard_data: { type: 'object', description: 'Alias for variables' },
+            parameters: { type: 'object', description: 'Alias for variables' },
+            create_component: { type: 'boolean', description: 'Whether to create a Blackboard node if not present (default: true)' },
+            script_path: { type: 'string', description: 'Optional path to create/attach a Blackboard GDScript component' },
+            export_as_script: { type: 'boolean', description: 'Whether to generate/attach a Blackboard script (default: true if script_path provided)' },
+            override_existing: { type: 'boolean', description: 'Whether to overwrite existing blackboard parameters (default: true)' },
           },
         },
       },

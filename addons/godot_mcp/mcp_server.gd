@@ -118,6 +118,10 @@ func process_command(cmd: String, params: Dictionary) -> Dictionary:
             return edit_script_in_editor(params)
         "validate_script":
             return validate_script_in_editor(params)
+        "analyze_gdscript_ast":
+            return analyze_gdscript_ast_in_editor(params)
+        "find_script_references":
+            return find_script_references_in_editor(params)
         "connect_signal":
             return connect_signal_in_editor(params)
         "disconnect_signal":
@@ -176,6 +180,18 @@ func process_command(cmd: String, params: Dictionary) -> Dictionary:
             return configure_control_anchors_in_editor(params)
         "set_control_theme_override":
             return set_control_theme_override_in_editor(params)
+        "replay_input_sequence":
+            return replay_input_sequence(params)
+        "import_asset":
+            return import_asset_in_editor(params)
+        "get_performance_metrics":
+            return get_performance_metrics_in_editor(params)
+        "get_memory_breakdown":
+            return get_memory_breakdown_in_editor(params)
+        "create_behavior_tree":
+            return create_behavior_tree_in_editor(params)
+        "configure_blackboard":
+            return configure_blackboard_in_editor(params)
         _:
             return {"status": "error", "error": "Unknown in-editor command: " + cmd}
 
@@ -670,6 +686,418 @@ func validate_script_in_editor(params: Dictionary) -> Dictionary:
         return {"status": "ok", "result": {"valid": true, "script_path": script_path, "can_instantiate": true}}
     return {"status": "error", "error": "Script validation failed"}
 
+func analyze_gdscript_ast_in_editor(params: Dictionary) -> Dictionary:
+    return analyze_gdscript_ast(params)
+
+func find_script_references_in_editor(params: Dictionary) -> Dictionary:
+    return find_script_references(params)
+
+func analyze_gdscript_ast(params: Dictionary) -> Dictionary:
+    var script_path = String(params.get("script_path", params.get("path", params.get("file_path", "")))).strip_edges()
+    var code = String(params.get("code", params.get("content", "")))
+
+    if script_path != "" and code == "":
+        if not FileAccess.file_exists(script_path):
+            return {"status": "error", "error": "Script file not found: " + script_path}
+        code = FileAccess.get_file_as_string(script_path)
+
+    if code == "":
+        return {"status": "error", "error": "No script_path or code provided for AST analysis"}
+
+    var ast = _parse_gdscript_ast_text(code)
+
+    if script_path != "" and FileAccess.file_exists(script_path):
+        var scr = ResourceLoader.load(script_path, "GDScript", ResourceLoader.CACHE_MODE_IGNORE) as Script
+        if scr:
+            if String(ast.get("class_name", "")) == "" and scr.get_global_name() != "":
+                ast["class_name"] = scr.get_global_name()
+            if String(ast.get("extends", "")) == "" and scr.get_instance_base_type() != "":
+                ast["extends"] = scr.get_instance_base_type()
+
+    return {"status": "ok", "result": ast}
+
+func _parse_gdscript_ast_text(code: String) -> Dictionary:
+    var ast = {
+        "class_name": "",
+        "extends": "",
+        "exported_variables": [],
+        "function_signatures": [],
+        "signal_definitions": [],
+        "inner_classes": []
+    }
+
+    var lines = code.split("\n")
+    var total_lines = lines.size()
+    var idx = 0
+
+    var re_class_name = RegEx.create_from_string("^\\s*class_name\\s+([A-Za-z0-9_]+)")
+    var re_extends = RegEx.create_from_string("^\\s*extends\\s+([A-Za-z0-9_]+|\"[^\"]+\"|'[^']+')")
+    var re_signal = RegEx.create_from_string("^\\s*signal\\s+([A-Za-z0-9_]+)(?:\\s*\\(([^)]*)\\))?")
+    var re_export_var = RegEx.create_from_string("^\\s*(@export[a-zA-Z0-9_]*(?:\\([^)]*\\))?)\\s*(?:@\\w+\\s*)*var\\s+([A-Za-z0-9_]+)(?:\\s*:\\s*([A-Za-z0-9_\\[\\]\\.]+))?(?:\\s*=\\s*(.*))?")
+    var re_var = RegEx.create_from_string("^\\s*var\\s+([A-Za-z0-9_]+)(?:\\s*:\\s*([A-Za-z0-9_\\[\\]\\.]+))?(?:\\s*=\\s*(.*))?")
+    var re_export_anno = RegEx.create_from_string("^\\s*(@export[a-zA-Z0-9_]*(?:\\([^)]*\\))?)")
+    var re_func = RegEx.create_from_string("^\\s*(static\\s+)?func\\s+([A-Za-z0-9_]+)\\s*\\(([^)]*)\\)(?:\\s*->\\s*([A-Za-z0-9_\\[\\]\\.]+))?:")
+    var re_inner_class = RegEx.create_from_string("^\\s*class\\s+([A-Za-z0-9_]+)(?:\\s+extends\\s+([A-Za-z0-9_]+|\"[^\"]+\"|'[^']+'))?:")
+
+    var pending_export_anno = ""
+
+    while idx < total_lines:
+        var line_num = idx + 1
+        var line = lines[idx]
+
+        var clean_line = _strip_gdscript_comment(line)
+        var trimmed = clean_line.strip_edges()
+
+        if trimmed == "":
+            idx += 1
+            continue
+
+        # 1. class_name
+        var m_class = re_class_name.search(clean_line)
+        if m_class:
+            ast["class_name"] = m_class.get_string(1)
+            pending_export_anno = ""
+            idx += 1
+            continue
+
+        # 2. extends
+        var m_ext = re_extends.search(clean_line)
+        if m_ext:
+            ast["extends"] = m_ext.get_string(1).strip_edges("\"'")
+            pending_export_anno = ""
+            idx += 1
+            continue
+
+        # 3. signal
+        var m_sig = re_signal.search(clean_line)
+        if m_sig:
+            var sig_name = m_sig.get_string(1)
+            var args_raw = m_sig.get_string(2)
+            var sig_args = _parse_gdscript_args(args_raw)
+            ast["signal_definitions"].append({
+                "name": sig_name,
+                "args": sig_args
+            })
+            pending_export_anno = ""
+            idx += 1
+            continue
+
+        # 4. inner class declaration
+        var m_ic = re_inner_class.search(clean_line)
+        if m_ic:
+            var ic_name = m_ic.get_string(1)
+            var ic_extends = m_ic.get_string(2).strip_edges("\"'")
+            var ic_indent = _get_indent_level(line)
+
+            var ic_lines: Array = []
+            idx += 1
+            while idx < total_lines:
+                var next_line = lines[idx]
+                var next_clean = _strip_gdscript_comment(next_line).strip_edges()
+                if next_clean != "":
+                    var next_indent = _get_indent_level(next_line)
+                    if next_indent <= ic_indent:
+                        break
+                ic_lines.append(next_line)
+                idx += 1
+
+            var ic_code = ""
+            for icl in ic_lines:
+                ic_code += icl + "\n"
+
+            var ic_ast = _parse_gdscript_ast_text(ic_code)
+            ic_ast["name"] = ic_name
+            if ic_extends != "":
+                ic_ast["extends"] = ic_extends
+            ast["inner_classes"].append(ic_ast)
+            pending_export_anno = ""
+            continue
+
+        # 5. func signature
+        var full_func_line = clean_line
+        var orig_func_idx = idx
+        if "func " in clean_line and not (":" in clean_line):
+            var peek_idx = idx + 1
+            while peek_idx < total_lines and not (":" in full_func_line):
+                full_func_line += " " + _strip_gdscript_comment(lines[peek_idx]).strip_edges()
+                peek_idx += 1
+
+        var m_func = re_func.search(full_func_line)
+        if m_func:
+            var is_static = m_func.get_string(1) != ""
+            var func_name = m_func.get_string(2)
+            var args_raw = m_func.get_string(3)
+            var ret_type = m_func.get_string(4)
+            if ret_type == "": ret_type = "void"
+            var func_args = _parse_gdscript_args(args_raw)
+            ast["function_signatures"].append({
+                "name": func_name,
+                "is_static": is_static,
+                "args": func_args,
+                "return_type": ret_type,
+                "line": line_num
+            })
+            pending_export_anno = ""
+            if "func " in clean_line and not (":" in clean_line):
+                idx = orig_func_idx + full_func_line.count("\n") + 1
+            else:
+                idx += 1
+            continue
+
+        # 6. @export variable
+        var m_exp_var = re_export_var.search(clean_line)
+        if m_exp_var:
+            var anno = m_exp_var.get_string(1)
+            var var_name = m_exp_var.get_string(2)
+            var var_type = m_exp_var.get_string(3)
+            var var_def = m_exp_var.get_string(4).strip_edges()
+            ast["exported_variables"].append({
+                "name": var_name,
+                "type": var_type if var_type != "" else "Variant",
+                "default_value": var_def if var_def != "" else null,
+                "annotation": anno
+            })
+            pending_export_anno = ""
+            idx += 1
+            continue
+
+        var m_anno = re_export_anno.search(clean_line)
+        if m_anno and not ("var " in clean_line):
+            pending_export_anno = m_anno.get_string(1)
+            idx += 1
+            continue
+
+        if pending_export_anno != "" and "var " in clean_line:
+            var m_v = re_var.search(clean_line)
+            if m_v:
+                var var_name = m_v.get_string(1)
+                var var_type = m_v.get_string(2)
+                var var_def = m_v.get_string(3).strip_edges()
+                ast["exported_variables"].append({
+                    "name": var_name,
+                    "type": var_type if var_type != "" else "Variant",
+                    "default_value": var_def if var_def != "" else null,
+                    "annotation": pending_export_anno
+                })
+            pending_export_anno = ""
+            idx += 1
+            continue
+
+        pending_export_anno = ""
+        idx += 1
+
+    return ast
+
+func _strip_gdscript_comment(line: String) -> String:
+    var in_quotes = false
+    var quote_char = ""
+    var i = 0
+    while i < line.length():
+        var c = line[i]
+        if not in_quotes:
+            if c == '"' or c == "'":
+                in_quotes = true
+                quote_char = c
+            elif c == '#':
+                return line.substr(0, i)
+        else:
+            if c == quote_char and (i == 0 or line[i - 1] != '\\'):
+                in_quotes = false
+        i += 1
+    return line
+
+func _get_indent_level(line: String) -> int:
+    var indent = 0
+    for i in range(line.length()):
+        var c = line[i]
+        if c == '\t':
+            indent += 4
+        elif c == ' ':
+            indent += 1
+        else:
+            break
+    return indent
+
+func _parse_gdscript_args(args_raw: String) -> Array:
+    var result: Array = []
+    if args_raw.strip_edges() == "":
+        return result
+
+    var raw_parts: Array = []
+    var current = ""
+    var depth = 0
+    var in_quotes = false
+    var quote_c = ""
+
+    for i in range(args_raw.length()):
+        var c = args_raw[i]
+        if not in_quotes:
+            if c == '"' or c == "'":
+                in_quotes = true
+                quote_c = c
+                current += c
+            elif c in ['(', '[', '{']:
+                depth += 1
+                current += c
+            elif c in [')', ']', '}']:
+                depth -= 1
+                current += c
+            elif c == ',' and depth == 0:
+                raw_parts.append(current.strip_edges())
+                current = ""
+            else:
+                current += c
+        else:
+            current += c
+            if c == quote_c and (i == 0 or args_raw[i - 1] != '\\'):
+                in_quotes = false
+
+    if current.strip_edges() != "":
+        raw_parts.append(current.strip_edges())
+
+    for part in raw_parts:
+        if part == "": continue
+        var arg_name = part
+        var arg_type = ""
+        var default_val = null
+
+        if "=" in part:
+            var eq_idx = part.find("=")
+            default_val = part.substr(eq_idx + 1).strip_edges()
+            part = part.substr(0, eq_idx).strip_edges()
+
+        if ":" in part:
+            var colon_idx = part.find(":")
+            arg_type = part.substr(colon_idx + 1).strip_edges()
+            arg_name = part.substr(0, colon_idx).strip_edges()
+        else:
+            arg_name = part.strip_edges()
+
+        result.append({
+            "name": arg_name,
+            "type": arg_type if arg_type != "" else "Variant",
+            "default_value": default_val
+        })
+
+    return result
+
+func find_script_references(params: Dictionary) -> Dictionary:
+    var target_path = String(params.get("target_path", params.get("target", params.get("script_path", "")))).strip_edges()
+    if target_path == "":
+        return {"status": "error", "error": "Missing target_path parameter"}
+
+    var project_dir = String(params.get("project_path", params.get("search_dir", "res://")))
+    if project_dir == "": project_dir = "res://"
+
+    var search_tokens: Array = []
+    
+    var res_path = target_path
+    if not res_path.begins_with("res://"):
+        res_path = "res://" + target_path.trim_prefix("./").trim_prefix("/")
+    
+    var rel_path = res_path.trim_prefix("res://")
+    var file_name = target_path.get_file()
+
+    search_tokens.append(res_path)
+    if rel_path != res_path and not (rel_path in search_tokens):
+        search_tokens.append(rel_path)
+
+    if FileAccess.file_exists(res_path) and res_path.ends_with(".gd"):
+        var code = FileAccess.get_file_as_string(res_path)
+        var re_cn = RegEx.create_from_string("^\\s*class_name\\s+([A-Za-z0-9_]+)")
+        var m = re_cn.search(code)
+        if m:
+            var cn = m.get_string(1)
+            if not (cn in search_tokens):
+                search_tokens.append(cn)
+
+    if FileAccess.file_exists(res_path):
+        if ResourceLoader.has_method("get_resource_uid"):
+            var uid_val = ResourceLoader.get_resource_uid(res_path)
+            if uid_val > 0 and ResourceUid.has_method("id_to_text"):
+                var uid_text = ResourceUid.id_to_text(uid_val)
+                if uid_text != "" and not (uid_text in search_tokens):
+                    search_tokens.append(uid_text)
+
+    var files_to_scan: Array = []
+    _collect_script_ref_files_recursive(project_dir, files_to_scan)
+
+    var references: Array = []
+
+    for file_path in files_to_scan:
+        if file_path == res_path:
+            continue
+
+        var fa = FileAccess.open(file_path, FileAccess.READ)
+        if not fa:
+            continue
+
+        var file_ext = file_path.get_extension().to_lower()
+        var file_type = "script" if file_ext == "gd" else ("scene" if file_ext == "tscn" else ("resource" if file_ext == "tres" else "other"))
+
+        var line_num = 0
+        while not fa.eof_reached():
+            var line = fa.get_line()
+            line_num += 1
+            
+            var matched_token = ""
+            for token in search_tokens:
+                if token in line:
+                    matched_token = token
+                    break
+            
+            if matched_token != "":
+                var ref_type = "occurrence"
+                if "[ext_resource" in line:
+                    ref_type = "ext_resource"
+                elif "preload(" in line:
+                    ref_type = "preload"
+                elif "load(" in line:
+                    ref_type = "load"
+                elif "extends " in line:
+                    ref_type = "extends"
+                elif "instance=" in line:
+                    ref_type = "instantiate"
+                elif "script = " in line:
+                    ref_type = "script_attachment"
+
+                references.append({
+                    "file_path": file_path,
+                    "file_type": file_type,
+                    "line_number": line_num,
+                    "line_content": line.strip_edges(),
+                    "reference_type": ref_type,
+                    "matched_token": matched_token
+                })
+
+    return {
+        "status": "ok",
+        "result": {
+            "target_path": res_path,
+            "search_tokens": search_tokens,
+            "total_references": references.size(),
+            "references": references
+        }
+    }
+
+func _collect_script_ref_files_recursive(dir_path: String, out_files: Array):
+    var dir = DirAccess.open(dir_path)
+    if not dir:
+        return
+    dir.list_dir_begin()
+    var file_name = dir.get_next()
+    while file_name != "":
+        if not file_name.begins_with("."):
+            var full_path = dir_path.path_join(file_name)
+            if dir.current_is_dir():
+                _collect_script_ref_files_recursive(full_path, out_files)
+            else:
+                var ext = file_name.get_extension().to_lower()
+                if ext in ["tscn", "tres", "gd"]:
+                    out_files.append(full_path)
+        file_name = dir.get_next()
+    dir.list_dir_end()
+
 func parse_connect_flags(flags_val) -> int:
     if typeof(flags_val) == TYPE_INT or typeof(flags_val) == TYPE_FLOAT:
         return int(flags_val)
@@ -992,6 +1420,104 @@ func simulate_input_event(params: Dictionary) -> Dictionary:
 
         _:
             return {"status": "error", "error": "Unsupported event_type: " + String(event_type)}
+
+func replay_input_sequence(params: Dictionary) -> Dictionary:
+    var sequence = params.get("sequence", [])
+    if typeof(sequence) != TYPE_ARRAY:
+        return {"status": "error", "error": "Parameter 'sequence' must be an Array"}
+
+    var log_messages: Array = []
+    var steps_executed: int = 0
+    var last_timestamp: float = -1.0
+
+    for i in range(sequence.size()):
+        var step = sequence[i]
+        if typeof(step) != TYPE_DICTIONARY:
+            continue
+
+        var step_num = i + 1
+        var timestamp = float(step.get("timestamp", -1.0))
+        if timestamp >= 0.0:
+            if last_timestamp >= 0.0 and timestamp > last_timestamp:
+                var delay_sec = timestamp - last_timestamp
+                OS.delay_msec(int(delay_sec * 1000.0))
+                log_messages.append("Step %d: Timestamp delay %.3fs" % [step_num, delay_sec])
+            last_timestamp = timestamp
+
+        var event_type = String(step.get("type", step.get("event_type", "")))
+        if event_type == "":
+            if step.has("action"):
+                event_type = "action"
+            elif step.has("key_code") or step.has("keycode"):
+                event_type = "key"
+            elif step.has("mouse_button_index") or step.has("button_index"):
+                event_type = "mouse_button"
+            else:
+                event_type = "action"
+
+        event_type = event_type.to_lower()
+        var duration = float(step.get("duration", step.get("delay", 0.0)))
+        var pressed = step.get("pressed", true)
+
+        if event_type == "delay" or event_type == "wait" or event_type == "sleep":
+            var delay_time = duration if duration > 0.0 else float(step.get("time", step.get("seconds", 0.0)))
+            if delay_time > 0.0:
+                OS.delay_msec(int(delay_time * 1000.0))
+                log_messages.append("Step %d: Delayed for %.3fs" % [step_num, delay_time])
+            steps_executed += 1
+            continue
+
+        var sim_step = step.duplicate()
+        sim_step["event_type"] = event_type
+
+        var sim_res = simulate_input_event(sim_step)
+        if sim_res.get("status") == "error":
+            log_messages.append("Step %d: Error - %s" % [step_num, sim_res.get("error", "Unknown error")])
+        else:
+            var desc = "Simulated %s" % event_type
+            if event_type == "action":
+                desc += " '%s' (pressed=%s)" % [step.get("action", ""), String(pressed)]
+            elif event_type == "key":
+                desc += " key_code '%s' (pressed=%s)" % [String(step.get("key_code", step.get("keycode", ""))), String(pressed)]
+            elif event_type == "mouse_button":
+                desc += " button %s (pressed=%s)" % [String(step.get("mouse_button_index", step.get("button_index", 1))), String(pressed)]
+            elif event_type == "mouse_motion":
+                desc += " motion"
+
+            log_messages.append("Step %d: %s" % [step_num, desc])
+
+            if duration > 0.0:
+                OS.delay_msec(int(duration * 1000.0))
+                if pressed:
+                    var release_step = sim_step.duplicate()
+                    release_step["pressed"] = false
+                    simulate_input_event(release_step)
+                    log_messages.append("Step %d: Released after %.3fs duration" % [step_num, duration])
+                else:
+                    log_messages.append("Step %d: Held duration %.3fs" % [step_num, duration])
+
+        steps_executed += 1
+
+    var take_ss = params.get("take_screenshot", true)
+    var screenshot_status = {}
+    if take_ss:
+        var ss_res = take_viewport_screenshot(params)
+        if ss_res.get("status") == "ok":
+            screenshot_status = ss_res.get("result", {})
+            screenshot_status["captured"] = true
+        else:
+            screenshot_status = {"captured": false, "error": ss_res.get("error", "Failed to take screenshot")}
+    else:
+        screenshot_status = {"captured": false, "reason": "Screenshot disabled by params"}
+
+    return {
+        "status": "ok",
+        "result": {
+            "log": log_messages,
+            "steps_executed": steps_executed,
+            "screenshot_status": screenshot_status
+        }
+    }
 
 func take_viewport_screenshot(params: Dictionary = {}) -> Dictionary:
     if not editor_interface:
@@ -2920,3 +3446,526 @@ func parse_vector2(val, default_val: Vector2 = Vector2.ZERO) -> Vector2:
     elif typeof(val) == TYPE_ARRAY and val.size() >= 2:
         return Vector2(float(val[0]), float(val[1]))
     return default_val
+
+func import_asset_in_editor(params: Dictionary) -> Dictionary:
+    var asset_path = String(params.get("asset_path", params.get("path", params.get("file_path", ""))))
+    if asset_path == "":
+        return {"status": "error", "error": "Missing asset_path parameter"}
+
+    if not asset_path.begins_with("res://") and not asset_path.begins_with("/"):
+        if FileAccess.file_exists("res://" + asset_path):
+            asset_path = "res://" + asset_path
+
+    if not FileAccess.file_exists(asset_path):
+        return {"status": "error", "error": "Asset file not found at: " + asset_path}
+
+    var import_file_path = asset_path + ".import"
+    var config = ConfigFile.new()
+    var file_existed = FileAccess.file_exists(import_file_path)
+
+    if file_existed:
+        var load_err = config.load(import_file_path)
+        if load_err != OK:
+            return {"status": "error", "error": "Failed to load .import file at '%s': %d" % [import_file_path, load_err]}
+
+    var ext = asset_path.get_extension().to_lower()
+    var default_importer = ""
+    var default_type = ""
+
+    if ext in ["gltf", "glb", "obj", "fbx", "blend"]:
+        default_importer = "scene"
+        default_type = "PackedScene"
+    elif ext in ["png", "jpg", "jpeg", "webp", "tga", "bmp", "svg"]:
+        default_importer = "texture"
+        default_type = "CompressedTexture2D"
+    elif ext == "wav":
+        default_importer = "wav"
+        default_type = "AudioStreamWAV"
+    elif ext == "ogg":
+        default_importer = "oggvorbis"
+        default_type = "AudioStreamOggVorbis"
+
+    if not config.has_section("remap"):
+        if default_importer != "":
+            config.set_value("remap", "importer", default_importer)
+            config.set_value("remap", "importer_version", 1)
+            config.set_value("remap", "type", default_type)
+        else:
+            config.set_value("remap", "importer", "keep")
+
+    if not config.has_section("deps"):
+        config.set_value("deps", "source_file", asset_path)
+
+    var current_importer = String(config.get_value("remap", "importer", default_importer))
+
+    # 1. Collision generation mode (3D models)
+    if params.has("collision_mode") or params.has("collision_generation_mode") or params.has("generate_collisions") or params.has("physics_import_mesh_has_collision"):
+        var col_val = params.get("collision_mode", params.get("collision_generation_mode", params.get("generate_collisions", params.get("physics_import_mesh_has_collision"))))
+        if typeof(col_val) == TYPE_BOOL:
+            config.set_value("params", "physics/import_mesh_has_collision", col_val)
+        else:
+            var c_str = String(col_val).to_lower()
+            if c_str in ["true", "trimesh", "convex", "static", "multiple", "1"]:
+                config.set_value("params", "physics/import_mesh_has_collision", true)
+            elif c_str in ["false", "none", "off", "0"]:
+                config.set_value("params", "physics/import_mesh_has_collision", false)
+
+    # 2. Scale (3D models)
+    if params.has("scale"):
+        var s_val = float(params["scale"])
+        config.set_value("params", "nodes/root_scale", s_val)
+        config.set_value("params", "nodes/scale_mesh", s_val)
+    if params.has("root_scale"):
+        config.set_value("params", "nodes/root_scale", float(params["root_scale"]))
+    if params.has("scale_mesh"):
+        config.set_value("params", "nodes/scale_mesh", float(params["scale_mesh"]))
+
+    # 3. Animation loop & loop mode (3D models, audio)
+    if params.has("animation_loop") or params.has("loop") or params.has("loop_mode"):
+        var has_loop_flag = params.has("animation_loop") or params.has("loop")
+        var loop_flag = params.get("animation_loop", params.get("loop", false))
+
+        if current_importer == "scene" or ext in ["gltf", "glb", "obj", "fbx", "blend"]:
+            config.set_value("params", "animation/import", true)
+            if has_loop_flag:
+                config.set_value("params", "animation/loop_mode", 1 if loop_flag else 0)
+            if params.has("loop_mode"):
+                var lm = String(params["loop_mode"]).to_lower()
+                if lm in ["none", "disabled", "off", "0"]:
+                    config.set_value("params", "animation/loop_mode", 0)
+                elif lm in ["linear", "loop", "forward", "1"]:
+                    config.set_value("params", "animation/loop_mode", 1)
+                elif lm in ["pingpong", "2"]:
+                    config.set_value("params", "animation/loop_mode", 2)
+                elif lm.is_valid_int():
+                    config.set_value("params", "animation/loop_mode", int(lm))
+        elif current_importer == "wav" or ext == "wav":
+            if has_loop_flag:
+                config.set_value("params", "edit/loop_mode", 1 if loop_flag else 0)
+            if params.has("loop_mode"):
+                var lm = String(params["loop_mode"]).to_lower()
+                if lm in ["disabled", "none", "off", "0"]:
+                    config.set_value("params", "edit/loop_mode", 0)
+                elif lm in ["forward", "linear", "loop", "1"]:
+                    config.set_value("params", "edit/loop_mode", 1)
+                elif lm in ["pingpong", "2"]:
+                    config.set_value("params", "edit/loop_mode", 2)
+                elif lm in ["backward", "3"]:
+                    config.set_value("params", "edit/loop_mode", 3)
+                elif lm.is_valid_int():
+                    config.set_value("params", "edit/loop_mode", int(lm))
+        elif current_importer == "oggvorbis" or ext == "ogg":
+            if has_loop_flag:
+                config.set_value("params", "loop", loop_flag)
+            if params.has("loop_mode"):
+                var lm = String(params["loop_mode"]).to_lower()
+                config.set_value("params", "loop", lm not in ["none", "disabled", "off", "0"])
+
+    # 4. Compressed VRAM formats (Textures)
+    if params.has("compressed_vram") or params.has("vram_compression") or params.has("vram_texture_compression") or params.has("compress_mode"):
+        if current_importer == "texture" or ext in ["png", "jpg", "jpeg", "webp", "tga", "bmp", "svg"]:
+            if params.has("compress_mode"):
+                var cm_val = params["compress_mode"]
+                if typeof(cm_val) == TYPE_INT or typeof(cm_val) == TYPE_FLOAT:
+                    config.set_value("params", "compress/mode", int(cm_val))
+                else:
+                    var cm = String(cm_val).to_lower()
+                    if cm in ["lossless", "0"]:
+                        config.set_value("params", "compress/mode", 0)
+                    elif cm in ["lossy", "1"]:
+                        config.set_value("params", "compress/mode", 1)
+                    elif cm in ["vram_compressed", "vram", "compressed", "2"]:
+                        config.set_value("params", "compress/mode", 2)
+                    elif cm in ["vram_uncompressed", "uncompressed", "3"]:
+                        config.set_value("params", "compress/mode", 3)
+                    elif cm in ["basis_universal", "basis", "4"]:
+                        config.set_value("params", "compress/mode", 4)
+            else:
+                var vram_flag = params.get("compressed_vram", params.get("vram_compression", params.get("vram_texture_compression", false)))
+                if vram_flag:
+                    config.set_value("params", "compress/mode", 2)
+
+    if params.has("high_quality"):
+        config.set_value("params", "compress/high_quality", bool(params["high_quality"]))
+
+    # 5. Direct custom import settings
+    var custom_settings = params.get("import_settings", params.get("custom_settings", params.get("settings", {})))
+    if typeof(custom_settings) == TYPE_DICTIONARY:
+        for k in custom_settings:
+            config.set_value("params", String(k), parse_variant(custom_settings[k]))
+
+    for k in params:
+        if "/" in String(k):
+            config.set_value("params", String(k), parse_variant(params[k]))
+
+    var save_err = config.save(import_file_path)
+    if save_err != OK:
+        return {"status": "error", "error": "Failed to save .import file at '%s': %d" % [import_file_path, save_err]}
+
+    var reimported = false
+    if editor_interface:
+        var efs = editor_interface.get_resource_filesystem()
+        if efs:
+            efs.reimport_files(PackedStringArray([asset_path]))
+            reimported = true
+
+    var updated_params = {}
+    if config.has_section("params"):
+        for k in config.get_section_keys("params"):
+            updated_params[k] = config.get_value("params", k)
+
+    return {
+        "status": "ok",
+        "result": {
+            "asset_path": asset_path,
+            "import_file": import_file_path,
+            "reimported": reimported,
+            "import_settings": updated_params
+        }
+    }
+
+func get_performance_metrics_in_editor(params: Dictionary = {}) -> Dictionary:
+    var metrics = {
+        "time_fps": Performance.get_monitor(Performance.TIME_FPS),
+        "time_process": Performance.get_monitor(Performance.TIME_PROCESS),
+        "time_physics_process": Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS),
+        "memory_static": Performance.get_monitor(Performance.MEMORY_STATIC),
+        "memory_static_max": Performance.get_monitor(Performance.MEMORY_STATIC_MAX),
+        "memory_message_buffer_max": Performance.get_monitor(Performance.MEMORY_MESSAGE_BUFFER_MAX),
+        "object_node_count": Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
+        "object_count": Performance.get_monitor(Performance.OBJECT_COUNT),
+        "object_resource_count": Performance.get_monitor(Performance.OBJECT_RESOURCE_COUNT),
+        "render_total_draw_calls_in_frame": Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+        "render_total_objects_in_frame": Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME),
+        "render_video_mem_used": Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED),
+        "physics_2d_active_objects": Performance.get_monitor(Performance.PHYSICS_2D_ACTIVE_OBJECTS),
+        "physics_2d_collision_pairs": Performance.get_monitor(Performance.PHYSICS_2D_COLLISION_PAIRS),
+        "physics_3d_active_objects": Performance.get_monitor(Performance.PHYSICS_3D_ACTIVE_OBJECTS),
+        "physics_3d_collision_pairs": Performance.get_monitor(Performance.PHYSICS_3D_COLLISION_PAIRS)
+    }
+    return {"status": "ok", "result": metrics}
+
+func get_memory_breakdown_in_editor(params: Dictionary = {}) -> Dictionary:
+    var mem_static = Performance.get_monitor(Performance.MEMORY_STATIC)
+    var mem_static_max = Performance.get_monitor(Performance.MEMORY_STATIC_MAX)
+    var mem_msg_buf_max = Performance.get_monitor(Performance.MEMORY_MESSAGE_BUFFER_MAX)
+
+    var vram_total = Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED)
+    var vram_texture = 0
+    if Performance.get("RENDER_TEXTURE_MEM_USED") != null:
+        vram_texture = Performance.get_monitor(Performance.get("RENDER_TEXTURE_MEM_USED"))
+    var vram_buffer = 0
+    if Performance.get("RENDER_BUFFER_MEM_USED") != null:
+        vram_buffer = Performance.get_monitor(Performance.get("RENDER_BUFFER_MEM_USED"))
+
+    var count_objects = Performance.get_monitor(Performance.OBJECT_COUNT)
+    var count_nodes = Performance.get_monitor(Performance.OBJECT_NODE_COUNT)
+    var count_resources = Performance.get_monitor(Performance.OBJECT_RESOURCE_COUNT)
+    var count_orphans = Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT)
+
+    var breakdown = {
+        "static_memory": {
+            "current_bytes": mem_static,
+            "peak_bytes": mem_static_max,
+            "message_buffer_max_bytes": mem_msg_buf_max
+        },
+        "video_memory": {
+            "total_video_mem_bytes": vram_total,
+            "texture_mem_bytes": vram_texture,
+            "buffer_mem_bytes": vram_buffer
+        },
+        "object_allocations": {
+            "object_count": count_objects,
+            "node_count": count_nodes,
+            "resource_count": count_resources,
+            "orphan_node_count": count_orphans
+        },
+        "summary": {
+            "total_static_mb": float(mem_static) / (1024.0 * 1024.0),
+            "peak_static_mb": float(mem_static_max) / (1024.0 * 1024.0),
+            "total_video_mb": float(vram_total) / (1024.0 * 1024.0),
+            "total_objects": count_objects,
+            "total_nodes": count_nodes,
+            "total_resources": count_resources
+        }
+    }
+    return {"status": "ok", "result": breakdown}
+
+func create_behavior_tree_in_editor(params: Dictionary) -> Dictionary:
+    var scene_path = String(params.get("scene_path", ""))
+    var parent_path = String(params.get("parent_path", "."))
+    var root_type = String(params.get("root_type", params.get("type", "Node")))
+    var root_name = String(params.get("root_name", params.get("name", "BehaviorTree")))
+    var nodes = params.get("nodes", [])
+    var tree_type = String(params.get("tree_type", "standard"))
+
+    var root: Node = editor_interface.get_edited_scene_root() if editor_interface else null
+    var created_root_scene = false
+
+    if not root:
+        if scene_path != "" and FileAccess.file_exists(scene_path):
+            var ps = ResourceLoader.load(scene_path) as PackedScene
+            if ps:
+                root = ps.instantiate()
+        else:
+            var base_type = root_type
+            if not ClassDB.class_exists(base_type):
+                base_type = "Node"
+            root = ClassDB.instantiate(base_type) as Node
+            root.name = root_name
+            created_root_scene = true
+
+    var parent_node: Node = root
+    var bt_root_node: Node = null
+
+    if created_root_scene:
+        bt_root_node = root
+    else:
+        if parent_path != "." and parent_path != "":
+            parent_node = root.get_node_or_null(parent_path)
+            if not parent_node:
+                return {"status": "error", "error": "Parent node not found: " + parent_path}
+
+        var bt_type = root_type
+        if not ClassDB.class_exists(bt_type):
+            bt_type = "Node"
+        bt_root_node = ClassDB.instantiate(bt_type) as Node
+        bt_root_node.name = root_name
+
+        if undo_redo_manager:
+            undo_redo_manager.create_action("Create BehaviorTree Root " + root_name)
+            undo_redo_manager.add_do_method(parent_node, "add_child", bt_root_node)
+            undo_redo_manager.add_do_method(bt_root_node, "set_owner", root)
+            undo_redo_manager.add_do_reference(bt_root_node)
+            undo_redo_manager.add_undo_method(parent_node, "remove_child", bt_root_node)
+            undo_redo_manager.commit_action()
+        else:
+            parent_node.add_child(bt_root_node)
+            bt_root_node.owner = root
+
+    var created_info = []
+    if typeof(nodes) == TYPE_ARRAY:
+        for n_def in nodes:
+            if typeof(n_def) == TYPE_DICTIONARY:
+                var child_info = _build_bt_node_in_editor(bt_root_node, n_def, root, tree_type)
+                created_info.append(child_info)
+
+    if scene_path != "":
+        var packed = PackedScene.new()
+        if packed.pack(root) == OK:
+            ResourceSaver.save(packed, scene_path)
+
+    if editor_interface:
+        editor_interface.get_resource_filesystem().scan()
+
+    return {
+        "status": "ok",
+        "result": {
+            "root_name": bt_root_node.name,
+            "root_type": bt_root_node.get_class(),
+            "tree_type": tree_type,
+            "scene_path": scene_path,
+            "nodes_created": created_info
+        }
+    }
+
+func _build_bt_node_in_editor(parent_node: Node, node_def: Dictionary, scene_root: Node, tree_type: String = "standard") -> Dictionary:
+    var name = String(node_def.get("name", "BTNode"))
+    var raw_type = String(node_def.get("type", "Node"))
+    var script_path = String(node_def.get("script_path", ""))
+    var script_content = String(node_def.get("script_content", ""))
+    var props = node_def.get("properties", {})
+
+    var resolved_type = raw_type
+    if not ClassDB.class_exists(resolved_type):
+        match raw_type.to_lower():
+            "sequence":
+                resolved_type = "BTSequence" if ClassDB.class_exists("BTSequence") else "Node"
+            "selector":
+                resolved_type = "BTSelector" if ClassDB.class_exists("BTSelector") else "Node"
+            "inverter":
+                resolved_type = "BTInverter" if ClassDB.class_exists("BTInverter") else "Node"
+            "action":
+                resolved_type = "BTAction" if ClassDB.class_exists("BTAction") else "Node"
+            "condition":
+                resolved_type = "BTCondition" if ClassDB.class_exists("BTCondition") else "Node"
+            _:
+                resolved_type = "Node"
+
+    var node = ClassDB.instantiate(resolved_type) as Node
+    node.name = name
+
+    if script_path != "":
+        if script_content != "":
+            var dir_path = script_path.get_base_dir()
+            if not DirAccess.dir_exists_absolute(dir_path):
+                DirAccess.make_dir_recursive_absolute(dir_path)
+            var f = FileAccess.open(script_path, FileAccess.WRITE)
+            if f:
+                f.store_string(script_content)
+                f.close()
+        elif not FileAccess.file_exists(script_path):
+            var default_code = _generate_default_bt_script(raw_type, script_path)
+            var dir_path = script_path.get_base_dir()
+            if not DirAccess.dir_exists_absolute(dir_path):
+                DirAccess.make_dir_recursive_absolute(dir_path)
+            var f = FileAccess.open(script_path, FileAccess.WRITE)
+            if f:
+                f.store_string(default_code)
+                f.close()
+
+        if FileAccess.file_exists(script_path):
+            var scr = ResourceLoader.load(script_path) as Script
+            if scr:
+                node.set_script(scr)
+
+    if typeof(props) == TYPE_DICTIONARY:
+        for k in props:
+            node.set(k, parse_variant(props[k]))
+
+    if undo_redo_manager:
+        undo_redo_manager.create_action("Add BT Node " + name)
+        undo_redo_manager.add_do_method(parent_node, "add_child", node)
+        undo_redo_manager.add_do_method(node, "set_owner", scene_root)
+        undo_redo_manager.add_do_reference(node)
+        undo_redo_manager.add_undo_method(parent_node, "remove_child", node)
+        undo_redo_manager.commit_action()
+    else:
+        parent_node.add_child(node)
+        if scene_root:
+            node.owner = scene_root
+
+    var children_info = []
+    var children_defs = node_def.get("children", [])
+    if typeof(children_defs) == TYPE_ARRAY:
+        for c_def in children_defs:
+            if typeof(c_def) == TYPE_DICTIONARY:
+                children_info.append(_build_bt_node_in_editor(node, c_def, scene_root, tree_type))
+
+    return {
+        "name": node.name,
+        "type": node.get_class(),
+        "path": String(node.get_path()) if node.is_inside_tree() else node.name,
+        "script": script_path,
+        "children": children_info
+    }
+
+func _generate_default_bt_script(node_type: String, _script_path: String) -> String:
+    var t = node_type.to_lower()
+    if "condition" in t:
+        if ClassDB.class_exists("BTCondition"):
+            return "extends BTCondition\n\n# LimboAI / BT Condition Script\nfunc _tick(delta: float) -> Status:\n\treturn Status.SUCCESS\n"
+        else:
+            return "extends Node\n\n# BT Condition Script\n@export var blackboard: Node\n\nfunc check_condition() -> bool:\n\treturn true\n"
+    elif "action" in t:
+        if ClassDB.class_exists("BTAction"):
+            return "extends BTAction\n\n# LimboAI / BT Action Script\nfunc _tick(delta: float) -> Status:\n\treturn Status.SUCCESS\n"
+        else:
+            return "extends Node\n\n# BT Action Script\n@export var blackboard: Node\n\nfunc execute(delta: float) -> int:\n\treturn 1 # 0: FAILURE, 1: SUCCESS, 2: RUNNING\n"
+    else:
+        return "extends Node\n\n# Behavior Tree Task Script\nfunc _ready():\n\tpass\n"
+
+func configure_blackboard_in_editor(params: Dictionary) -> Dictionary:
+    var scene_path = String(params.get("scene_path", ""))
+    var node_path = String(params.get("node_path", params.get("parent_path", ".")))
+    var variables = params.get("variables", params.get("blackboard_data", params.get("parameters", {})))
+    var bb_name = String(params.get("blackboard_name", "Blackboard"))
+    var create_component = bool(params.get("create_component", true))
+    var script_path = String(params.get("script_path", ""))
+    var export_as_script = bool(params.get("export_as_script", script_path != ""))
+    var override_existing = bool(params.get("override_existing", true))
+
+    if typeof(variables) != TYPE_DICTIONARY:
+        variables = {}
+
+    var parsed_vars = {}
+    for k in variables:
+        parsed_vars[k] = parse_variant(variables[k])
+
+    var scene_root: Node = editor_interface.get_edited_scene_root() if editor_interface else null
+    if not scene_root and scene_path != "" and FileAccess.file_exists(scene_path):
+        var ps = ResourceLoader.load(scene_path) as PackedScene
+        if ps:
+            scene_root = ps.instantiate()
+
+    var target_node: Node = null
+    if scene_root:
+        target_node = scene_root if node_path == "." else scene_root.get_node_or_null(node_path)
+
+    if not target_node:
+        if scene_root and create_component:
+            target_node = Node.new()
+            target_node.name = bb_name
+            if undo_redo_manager:
+                undo_redo_manager.create_action("Add Blackboard Node " + bb_name)
+                undo_redo_manager.add_do_method(scene_root, "add_child", target_node)
+                undo_redo_manager.add_do_method(target_node, "set_owner", scene_root)
+                undo_redo_manager.add_do_reference(target_node)
+                undo_redo_manager.add_undo_method(scene_root, "remove_child", target_node)
+                undo_redo_manager.commit_action()
+            else:
+                scene_root.add_child(target_node)
+                target_node.owner = scene_root
+        elif not scene_root:
+            target_node = Node.new()
+            target_node.name = bb_name
+            scene_root = target_node
+
+    if script_path != "" or export_as_script:
+        if script_path == "":
+            script_path = "res://scripts/blackboard.gd"
+        var dir_path = script_path.get_base_dir()
+        if not DirAccess.dir_exists_absolute(dir_path):
+            DirAccess.make_dir_recursive_absolute(dir_path)
+
+        var script_code = _generate_blackboard_script(parsed_vars)
+        var f = FileAccess.open(script_path, FileAccess.WRITE)
+        if f:
+            f.store_string(script_code)
+            f.close()
+
+        if FileAccess.file_exists(script_path):
+            var scr = ResourceLoader.load(script_path) as Script
+            if scr:
+                target_node.set_script(scr)
+
+    var current_vars = target_node.get_meta("blackboard", {})
+    if typeof(current_vars) != TYPE_DICTIONARY:
+        current_vars = {}
+
+    if override_existing:
+        current_vars = parsed_vars.duplicate()
+    else:
+        for k in parsed_vars:
+            current_vars[k] = parsed_vars[k]
+
+    target_node.set_meta("blackboard", current_vars)
+
+    for k in parsed_vars:
+        if k in target_node:
+            target_node.set(k, parsed_vars[k])
+
+    if scene_path != "" and scene_root:
+        var packed = PackedScene.new()
+        if packed.pack(scene_root) == OK:
+            ResourceSaver.save(packed, scene_path)
+
+    if editor_interface:
+        editor_interface.get_resource_filesystem().scan()
+
+    return {
+        "status": "ok",
+        "result": {
+            "node_path": String(target_node.get_path()) if target_node.is_inside_tree() else target_node.name,
+            "variables": current_vars,
+            "scene_path": scene_path,
+            "script_path": script_path if (script_path != "" or export_as_script) else ""
+        }
+    }
+
+func _generate_blackboard_script(variables: Dictionary) -> String:
+    var var_str = JSON.stringify(variables, "    ")
+    return "extends Node\nclass_name Blackboard\n\nsignal variable_changed(key: String, value: Variant)\n\n@export var data: Dictionary = %s\n\nfunc set_var(key: String, value: Variant) -> void:\n\tdata[key] = value\n\tvariable_changed.emit(key, value)\n\nfunc get_var(key: String, default_value: Variant = null) -> Variant:\n\treturn data.get(key, default_value)\n\nfunc has_var(key: String) -> bool:\n\treturn data.has(key)\n" % var_str
+
+
+
