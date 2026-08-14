@@ -537,10 +537,62 @@ class GodotMCPServer {
       },
       {
         name: 'create_shader_material',
-        description: 'Creates a ShaderMaterial with GDShader code.',
+        description: 'Creates a ShaderMaterial with GDShader code (supports canvas_item, spatial, sky, fog). Can save as resource or attach to node in scene.',
         inputSchema: {
           type: 'object',
-          properties: { shader_code: { type: 'string' }, output_path: { type: 'string' } },
+          properties: {
+            shader_code: { type: 'string', description: 'GDShader code snippet or complete shader text' },
+            shader_type: { type: 'string', description: 'canvas_item, spatial, sky, fog (default: canvas_item)' },
+            output_path: { type: 'string', description: 'Path to save .tres/.material file' },
+            save_path: { type: 'string', description: 'Alias for output_path' },
+            shader_path: { type: 'string', description: 'Path to save raw .gdshader code file' },
+            shader_parameters: { type: 'object', description: 'Initial uniform values map' },
+            scene_path: { type: 'string', description: 'Target .tscn scene path to attach material' },
+            node_path: { type: 'string', description: 'Target node path in scene' },
+          },
+        },
+      },
+      {
+        name: 'set_shader_parameter',
+        description: 'Sets uniforms/parameters on a ShaderMaterial attached to a Sprite2D, MeshInstance3D, ColorRect, or saved material resource.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string', description: 'Scene file path (for headless mode)' },
+            node_path: { type: 'string', description: 'Node path containing the ShaderMaterial' },
+            material_path: { type: 'string', description: 'Direct path to .tres material file' },
+            param_name: { type: 'string', description: 'Uniform parameter name' },
+            value: { type: 'any', description: 'Parameter value (scalar, vector, color, texture res:// path)' },
+            parameters: { type: 'object', description: 'Dictionary of multiple parameter key-values' },
+            surface_index: { type: 'number', description: 'Surface override index for MeshInstance3D' },
+          },
+        },
+      },
+      {
+        name: 'create_visual_shader',
+        description: 'Generates a VisualShader resource with graph nodes and connections.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            shader_type: { type: 'string', description: 'canvas_item, spatial, sky, fog, particles (default: canvas_item)' },
+            mode: { type: 'string', description: 'Alias for shader_type' },
+            output_path: { type: 'string', description: 'Path to save .tres VisualShader resource' },
+            save_path: { type: 'string', description: 'Alias for output_path' },
+            nodes: {
+              type: 'array',
+              description: 'List of nodes: { type: "VisualShaderNodeColorConstant", position: {x,y}, properties: {...}, stage: "fragment" }',
+              items: { type: 'object' },
+            },
+            connections: {
+              type: 'array',
+              description: 'List of connections: { from_node: int, from_port: int, to_node: int, to_port: int, stage: "fragment" }',
+              items: { type: 'object' },
+            },
+            create_material: { type: 'boolean', description: 'Whether to wrap in ShaderMaterial (default: true)' },
+            material_save_path: { type: 'string', description: 'Path to save generated ShaderMaterial' },
+            scene_path: { type: 'string', description: 'Target scene file path' },
+            node_path: { type: 'string', description: 'Target node path to attach generated material' },
+          },
         },
       },
       {
@@ -608,6 +660,54 @@ class GodotMCPServer {
             name: { type: 'string', description: 'Name of the Autoload singleton to remove' },
           },
           required: ['name'],
+        },
+      },
+      {
+        name: 'set_tilemap_cell',
+        description: 'Sets tile cell on TileMap or TileMapLayer with source_id, atlas_coords, and alternative_tile.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string', description: 'Scene file path (for headless mode)' },
+            node_path: { type: 'string', description: 'Path to TileMap or TileMapLayer node' },
+            layer: { type: 'number', description: 'Layer index (for TileMap, default 0)' },
+            coords: { type: 'object', description: '{x, y} tile coordinates' },
+            source_id: { type: 'number', description: 'TileSet source ID' },
+            atlas_coords: { type: 'object', description: '{x, y} coordinates in atlas' },
+            alternative_tile: { type: 'number', description: 'Alternative tile ID (default 0)' },
+          },
+          required: ['node_path'],
+        },
+      },
+      {
+        name: 'configure_navigation_region',
+        description: 'Sets up NavigationRegion2D or NavigationRegion3D with NavigationMesh or NavigationPolygon.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string', description: 'Scene file path' },
+            node_path: { type: 'string', description: 'Path to NavigationRegion node' },
+            navmesh_path: { type: 'string', description: 'Path to NavigationMesh/NavigationPolygon resource (.tres/.res)' },
+            is_3d: { type: 'boolean', description: 'Whether this is a 3D navigation region' },
+            bake: { type: 'boolean', description: 'Whether to bake navigation mesh' },
+          },
+          required: ['node_path'],
+        },
+      },
+      {
+        name: 'set_gridmap_cell',
+        description: 'Places mesh library items into GridMap at (x, y, z) coordinates.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            scene_path: { type: 'string', description: 'Scene file path' },
+            node_path: { type: 'string', description: 'Path to GridMap node' },
+            position: { type: 'object', description: '{x, y, z} grid coordinates' },
+            item: { type: 'number', description: 'MeshLibrary item index' },
+            orientation: { type: 'number', description: 'Item orientation (0-23)' },
+            mesh_library_path: { type: 'string', description: 'Path to MeshLibrary resource' },
+          },
+          required: ['node_path'],
         },
       },
     ];
