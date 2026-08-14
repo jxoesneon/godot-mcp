@@ -1,12 +1,12 @@
 # Godot MCP Pro (v2.0)
 
-[![Github-sponsors](https://img.shields.io/badge/sponsor-30363D?style=for-the-badge&logo=GitHub-Sponsors&logoColor=#EA4AAA)](https://github.com/sponsors/Coding-Solo)
+[![Github-sponsors](https://img.shields.io/badge/sponsor-30363D?style=for-the-badge&logo=GitHub-Sponsors&logoColor=#EA4AAA)](https://github.com/jxoesneon)
 [![](https://badge.mcpx.dev?type=server 'MCP Server')](https://modelcontextprotocol.io/introduction)
 [![Made with Godot](https://img.shields.io/badge/Made%20with-Godot%204.x-478CBF?style=flat&logo=godot%20engine&logoColor=white)](https://godotengine.org)
 [![](https://img.shields.io/badge/Node.js-339933?style=flat&logo=nodedotjs&logoColor=white 'Node.js')](https://nodejs.org/en/download/)
 [![](https://img.shields.io/badge/TypeScript-3178C6?style=flat&logo=typescript&logoColor=white 'TypeScript')](https://www.typescriptlang.org/)
-[![](https://img.shields.io/github/last-commit/Coding-Solo/godot-mcp 'Last Commit')](https://github.com/Coding-Solo/godot-mcp/commits/main)
-[![](https://img.shields.io/github/stars/Coding-Solo/godot-mcp 'Stars')](https://github.com/Coding-Solo/godot-mcp/stargazers)
+[![](https://img.shields.io/github/last-commit/jxoesneon/godot-mcp 'Last Commit')](https://github.com/jxoesneon/godot-mcp/commits/main)
+[![](https://img.shields.io/github/stars/jxoesneon/godot-mcp 'Stars')](https://github.com/jxoesneon/godot-mcp/stargazers)
 [![](https://img.shields.io/badge/License-MIT-red.svg 'MIT License')](https://opensource.org/licenses/MIT)
 
 ```text
@@ -218,7 +218,7 @@ This triggers Godot's `Input.parse_input_event()`, allowing automated testing of
 Ensure you have **Node.js 18+** and **Godot 4.x** installed.
 
 ```bash
-git clone https://github.com/Coding-Solo/godot-mcp.git
+git clone https://github.com/jxoesneon/godot-mcp.git
 cd godot-mcp
 npm install
 npm run build
