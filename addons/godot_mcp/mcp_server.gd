@@ -92,6 +92,13 @@ func process_command(cmd: String, params: Dictionary) -> Dictionary:
     match cmd:
         "ping":
             return {"status": "ok", "result": {"version": "2.0.0", "mode": "in_editor"}}
+
+        "execute_gdscript":
+            return execute_gdscript_in_editor(params)
+        "read_resource":
+            return read_resource_in_editor(params)
+        "modify_resource":
+            return modify_resource_in_editor(params)
         "create_scene":
             return create_scene_in_editor(params)
         "get_scene_tree":
@@ -763,7 +770,7 @@ func _parse_gdscript_ast_text(code: String) -> Dictionary:
         # 2. extends
         var m_ext = re_extends.search(clean_line)
         if m_ext:
-            ast["extends"] = m_ext.get_string(1).strip_edges("\"'")
+            ast["extends"] = m_ext.get_string(1).trim_prefix("\"").trim_suffix("\"").trim_prefix("'").trim_suffix("'")
             pending_export_anno = ""
             idx += 1
             continue
@@ -786,7 +793,7 @@ func _parse_gdscript_ast_text(code: String) -> Dictionary:
         var m_ic = re_inner_class.search(clean_line)
         if m_ic:
             var ic_name = m_ic.get_string(1)
-            var ic_extends = m_ic.get_string(2).strip_edges("\"'")
+            var ic_extends = m_ic.get_string(2).trim_prefix("\"").trim_suffix("\"").trim_prefix("'").trim_suffix("'")
             var ic_indent = _get_indent_level(line)
 
             var ic_lines: Array = []
@@ -1014,8 +1021,8 @@ func find_script_references(params: Dictionary) -> Dictionary:
     if FileAccess.file_exists(res_path):
         if ResourceLoader.has_method("get_resource_uid"):
             var uid_val = ResourceLoader.get_resource_uid(res_path)
-            if uid_val > 0 and ResourceUid.has_method("id_to_text"):
-                var uid_text = ResourceUid.id_to_text(uid_val)
+            if uid_val > 0 and ResourceUID.has_method("id_to_text"):
+                var uid_text = ResourceUID.id_to_text(uid_val)
                 if uid_text != "" and not (uid_text in search_tokens):
                     search_tokens.append(uid_text)
 
@@ -2091,7 +2098,7 @@ func create_shape_resource(shape_type: String, shape_params: Dictionary, is_3d: 
                 shape.height = float(shape_params.get("height", 2.0))
                 return shape
             "worldboundary", "world_boundary":
-                var shape = WorldBoundary3D.new()
+                var shape = WorldBoundaryShape3D.new()
                 var norm = parse_vector3(shape_params.get("normal", Vector3.UP))
                 var d = float(shape_params.get("d", shape_params.get("distance", 0.0)))
                 shape.plane = Plane(norm, d)
@@ -2141,7 +2148,7 @@ func create_shape_resource(shape_type: String, shape_params: Dictionary, is_3d: 
                 shape.b = parse_vector2(shape_params.get("b", Vector2(0, 10)))
                 return shape
             "worldboundary", "world_boundary":
-                var shape = WorldBoundary2D.new()
+                var shape = WorldBoundaryShape2D.new()
                 shape.normal = parse_vector2(shape_params.get("normal", Vector2.UP))
                 shape.distance = float(shape_params.get("d", shape_params.get("distance", 0.0)))
                 return shape
@@ -3279,8 +3286,8 @@ func get_uid_in_editor(params: Dictionary) -> Dictionary:
         return {"status": "error", "error": "Missing file_path parameter"}
     var uid_int = ResourceLoader.get_resource_uid(file_path)
     var uid_text = ""
-    if uid_int != -1 and ClassDB.class_exists("ResourceUid"):
-        uid_text = ResourceUid.id_to_text(uid_int)
+    if uid_int != -1 and ClassDB.class_exists("ResourceUID"):
+        uid_text = ResourceUID.id_to_text(uid_int)
     elif uid_int != -1:
         uid_text = "uid://" + String.num_int64(uid_int, 36)
     return {
@@ -3401,7 +3408,7 @@ func process_and_encode_image(img: Image, params: Dictionary) -> Dictionary:
         new_w = int(new_h * scale)
 
     if new_w != orig_w or new_h != orig_h:
-        img.resize(new_w, new_h, Image.INTERPOLATION_LANCZOS)
+        img.resize(new_w, new_h, Image.INTERPOLATE_LANCZOS)
 
     var buffer: PackedByteArray
     var mime_type = "image/png"
@@ -3437,15 +3444,6 @@ func parse_key_code(val) -> Key:
     if kc != KEY_NONE:
         return kc
     return KEY_NONE
-
-func parse_vector2(val, default_val: Vector2 = Vector2.ZERO) -> Vector2:
-    if typeof(val) == TYPE_VECTOR2:
-        return val
-    elif typeof(val) == TYPE_DICTIONARY:
-        return Vector2(float(val.get("x", default_val.x)), float(val.get("y", default_val.y)))
-    elif typeof(val) == TYPE_ARRAY and val.size() >= 2:
-        return Vector2(float(val[0]), float(val[1]))
-    return default_val
 
 func import_asset_in_editor(params: Dictionary) -> Dictionary:
     var asset_path = String(params.get("asset_path", params.get("path", params.get("file_path", ""))))
@@ -3969,3 +3967,47 @@ func _generate_blackboard_script(variables: Dictionary) -> String:
 
 
 
+
+
+func execute_gdscript_in_editor(params: Dictionary) -> Dictionary:
+    var code = params.get("code", "")
+    var script = GDScript.new()
+    script.source_code = "func eval():\n"
+    for line in code.split("\n"):
+        script.source_code += "\t" + line + "\n"
+    var err = script.reload()
+    if err != OK:
+        return {"status": "error", "error": "Failed to compile GDScript code."}
+    var obj = RefCounted.new()
+    obj.set_script(script)
+    var result = obj.call("eval")
+    var str_res = str(result)
+    return {"status": "ok", "result": str_res}
+
+func read_resource_in_editor(params: Dictionary) -> Dictionary:
+    var res_path = params.get("resource_path", "")
+    if not FileAccess.file_exists(res_path):
+        return {"status": "error", "error": "Resource not found: " + res_path}
+    var res = ResourceLoader.load(res_path)
+    if not res:
+        return {"status": "error", "error": "Failed to load resource"}
+    var props = {}
+    for p in res.get_property_list():
+        var name = p["name"]
+        props[name] = str(res.get(name))
+    return {"status": "ok", "result": props}
+
+func modify_resource_in_editor(params: Dictionary) -> Dictionary:
+    var res_path = params.get("resource_path", "")
+    var props = params.get("properties", {})
+    if not FileAccess.file_exists(res_path):
+        return {"status": "error", "error": "Resource not found: " + res_path}
+    var res = ResourceLoader.load(res_path)
+    if not res:
+        return {"status": "error", "error": "Failed to load resource"}
+    for k in props:
+        res.set(k, parse_variant(props[k]))
+    ResourceSaver.save(res, res_path)
+    if editor_interface:
+        editor_interface.get_resource_filesystem().scan()
+    return {"status": "ok", "result": "Resource updated"}

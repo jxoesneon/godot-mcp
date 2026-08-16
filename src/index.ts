@@ -262,6 +262,40 @@ class GodotMCPServer {
   private getToolDefinitions(): Tool[] {
     return [
       {
+        name: 'execute_gdscript',
+        description: 'Executes raw GDScript code dynamically in the editor or headless mode.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', description: 'GDScript code to execute (should contain a function or be standalone)' }
+          },
+          required: ['code']
+        }
+      },
+      {
+        name: 'read_resource',
+        description: 'Reads properties from a .tres/.res Godot resource file.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            resource_path: { type: 'string', description: 'Path to resource (e.g. res://data.tres)' }
+          },
+          required: ['resource_path']
+        }
+      },
+      {
+        name: 'modify_resource',
+        description: 'Modifies properties of a .tres/.res Godot resource file.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            resource_path: { type: 'string', description: 'Path to resource (e.g. res://data.tres)' },
+            properties: { type: 'object', description: 'Key-value map of properties to set' }
+          },
+          required: ['resource_path', 'properties']
+        }
+      },
+      {
         name: 'install_editor_plugin',
         description: 'Installs the Godot MCP Pro Bridge editor plugin into a target Godot 4 project path for live in-editor WebSocket capabilities and Ctrl+Z UndoRedo support.',
         inputSchema: {

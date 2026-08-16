@@ -43,6 +43,13 @@ func _init():
 
 func dispatch_operation(op: String, params: Dictionary) -> Dictionary:
     match op:
+
+        "execute_gdscript":
+            return execute_gdscript(params)
+        "read_resource":
+            return read_resource(params)
+        "modify_resource":
+            return modify_resource(params)
         "create_scene":
             return create_scene(params)
         "add_node":
@@ -3965,3 +3972,45 @@ func _generate_blackboard_script(variables: Dictionary) -> String:
 
 
 
+
+
+func execute_gdscript(params: Dictionary) -> Dictionary:
+    var code = params.get("code", "")
+    var script = GDScript.new()
+    script.source_code = "func eval():\n"
+    for line in code.split("\n"):
+        script.source_code += "\t" + line + "\n"
+    var err = script.reload()
+    if err != OK:
+        return {"status": "error", "error": "Failed to compile GDScript code."}
+    var obj = RefCounted.new()
+    obj.set_script(script)
+    var result = obj.call("eval")
+    var str_res = str(result)
+    return {"status": "ok", "result": str_res}
+
+func read_resource(params: Dictionary) -> Dictionary:
+    var res_path = params.get("resource_path", "")
+    if not FileAccess.file_exists(res_path):
+        return {"status": "error", "error": "Resource not found: " + res_path}
+    var res = ResourceLoader.load(res_path)
+    if not res:
+        return {"status": "error", "error": "Failed to load resource"}
+    var props = {}
+    for p in res.get_property_list():
+        var name = p["name"]
+        props[name] = str(res.get(name))
+    return {"status": "ok", "result": props}
+
+func modify_resource(params: Dictionary) -> Dictionary:
+    var res_path = params.get("resource_path", "")
+    var props = params.get("properties", {})
+    if not FileAccess.file_exists(res_path):
+        return {"status": "error", "error": "Resource not found: " + res_path}
+    var res = ResourceLoader.load(res_path)
+    if not res:
+        return {"status": "error", "error": "Failed to load resource"}
+    for k in props:
+        res.set(k, parse_variant(props[k]))
+    ResourceSaver.save(res, res_path)
+    return {"status": "ok", "result": "Resource updated"}
