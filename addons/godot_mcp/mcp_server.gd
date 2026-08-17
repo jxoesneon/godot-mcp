@@ -3,6 +3,8 @@ extends Node
 
 var editor_interface: EditorInterface = null
 var undo_redo_manager: EditorUndoRedoManager = null
+var dock_instance = null
+var debugger_plugin = null
 var tcp_server: TCPServer = TCPServer.new()
 var port: int = 6505
 var peers: Array = []
@@ -94,6 +96,18 @@ func process_command(cmd: String, params: Dictionary) -> Dictionary:
             return {"status": "ok", "result": {"version": "2.0.0", "mode": "in_editor"}}
         "get_godot_version":
             return {"status": "ok", "result": Engine.get_version_info()}
+
+        # --- Deep Integration Commands ---
+        "get_editor_selection":
+            return get_editor_selection_in_editor(params)
+        "set_editor_selection":
+            return set_editor_selection_in_editor(params)
+        "focus_editor_viewport_3d":
+            return focus_editor_viewport_3d_in_editor(params)
+        "get_active_script_editor":
+            return get_active_script_editor_in_editor(params)
+        "get_debugger_errors":
+            return get_debugger_errors_in_editor(params)
 
         "execute_gdscript":
             return execute_gdscript_in_editor(params)
@@ -4035,3 +4049,82 @@ func modify_resource_in_editor(params: Dictionary) -> Dictionary:
     if editor_interface:
         editor_interface.get_resource_filesystem().scan()
     return {"status": "ok", "result": "Resource updated"}
+
+func get_editor_selection_in_editor(_params: Dictionary) -> Dictionary:
+    if not editor_interface:
+        return {"status": "error", "error": "EditorInterface not available"}
+    var sel = editor_interface.get_selection().get_selected_nodes()
+    var result = []
+    for n in sel:
+        result.append({
+            "name": n.name,
+            "class": n.get_class(),
+            "path": String(n.get_path())
+        })
+    return {"status": "ok", "result": result}
+
+func set_editor_selection_in_editor(params: Dictionary) -> Dictionary:
+    if not editor_interface:
+        return {"status": "error", "error": "EditorInterface not available"}
+    var root = editor_interface.get_edited_scene_root()
+    if not root:
+        return {"status": "error", "error": "No active scene open in editor"}
+    var paths = params.get("nodes", params.get("paths", []))
+    if typeof(paths) == TYPE_STRING:
+        paths = [paths]
+    
+    var sel = editor_interface.get_selection()
+    sel.clear()
+    var selected_count = 0
+    for p in paths:
+        var target = root if (p == "." or p == "" or p == root.name) else root.get_node_or_null(p)
+        if target:
+            sel.add_node(target)
+            editor_interface.edit_node(target)
+            selected_count += 1
+            
+    return {"status": "ok", "result": {"selected_count": selected_count}}
+
+func focus_editor_viewport_3d_in_editor(params: Dictionary) -> Dictionary:
+    if not editor_interface:
+        return {"status": "error", "error": "EditorInterface not available"}
+    var root = editor_interface.get_edited_scene_root()
+    var node_path = params.get("node_path", params.get("target", "."))
+    var target: Node = root if (node_path == "." or node_path == "" or (root and node_path == root.name)) else (root.get_node_or_null(node_path) if root else null)
+    
+    if target:
+        editor_interface.get_selection().clear()
+        editor_interface.get_selection().add_node(target)
+        editor_interface.edit_node(target)
+        if target is Node3D:
+            return {"status": "ok", "result": {"focused_node": target.name, "global_position": str(target.global_position)}}
+        return {"status": "ok", "result": {"focused_node": target.name}}
+    
+    return {"status": "ok", "result": "Focused 3D editor viewport"}
+
+func get_active_script_editor_in_editor(_params: Dictionary) -> Dictionary:
+    if not editor_interface:
+        return {"status": "error", "error": "EditorInterface not available"}
+    var script_editor = editor_interface.get_script_editor()
+    if not script_editor:
+        return {"status": "error", "error": "ScriptEditor not active"}
+    var cur_script = script_editor.get_current_script()
+    if not cur_script:
+        return {"status": "ok", "result": {"active_script": null, "open_scripts": []}}
+    
+    var open_list = []
+    for s in script_editor.get_open_scripts():
+        open_list.append(s.resource_path)
+        
+    return {
+        "status": "ok",
+        "result": {
+            "active_script": cur_script.resource_path,
+            "open_scripts": open_list
+        }
+    }
+
+func get_debugger_errors_in_editor(_params: Dictionary) -> Dictionary:
+    if debugger_plugin and debugger_plugin.has_method("get_errors"):
+        return {"status": "ok", "result": debugger_plugin.get_errors()}
+    return {"status": "ok", "result": []}

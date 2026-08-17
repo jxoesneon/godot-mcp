@@ -271,6 +271,55 @@ export class GodotMCPServer {
   private getToolDefinitions(): Tool[] {
     return [
       {
+        name: 'get_editor_selection',
+        description: 'Returns the currently selected nodes in the active Godot scene tree with their names, classes, and paths.',
+        inputSchema: {
+          type: 'object',
+          properties: {}
+        }
+      },
+      {
+        name: 'set_editor_selection',
+        description: 'Selects specific nodes in the Godot scene tree and opens them in the Inspector.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            nodes: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'Array of node paths or names to select in the editor'
+            }
+          },
+          required: ['nodes']
+        }
+      },
+      {
+        name: 'focus_editor_viewport_3d',
+        description: 'Frames and focuses the 3D editor viewport camera on a target node or position.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            target: { type: 'string', description: 'Node path or name to focus in 3D viewport' }
+          }
+        }
+      },
+      {
+        name: 'get_active_script_editor',
+        description: 'Retrieves the currently open script and active script tab list from the Godot Script Editor.',
+        inputSchema: {
+          type: 'object',
+          properties: {}
+        }
+      },
+      {
+        name: 'get_debugger_errors',
+        description: 'Retrieves real-time runtime errors, stack traces, and debugger session events captured by the MCP Debugger Plugin.',
+        inputSchema: {
+          type: 'object',
+          properties: {}
+        }
+      },
+      {
         name: 'execute_gdscript',
         description: 'Executes raw GDScript code dynamically in the editor or headless mode.',
         inputSchema: {
