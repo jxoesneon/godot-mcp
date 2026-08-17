@@ -25,7 +25,7 @@ interface RunningProcess {
   projectPath: string;
 }
 
-class GodotMCPServer {
+export class GodotMCPServer {
   private server: Server;
   private runningProjects: Map<string, RunningProcess> = new Map();
   private godotPath: string | null = null;
@@ -133,16 +133,25 @@ class GodotMCPServer {
   }
 
   private async dispatchSmartOp(opName: string, params: Record<string, any>): Promise<any> {
-    // 1. Try Live In-Editor WebSocket Bridge first!
+    // Normalize aliases for parameters
+    if (opName === 'execute_gdscript') {
+      params.code = params.code || params.script_code || params.script || '';
+    }
+
+    // 1. Try Live In-Editor TCP Bridge first!
     try {
       const isConnected = await this.editorBridge.isEditorConnected();
       if (isConnected) {
         const res = await this.editorBridge.sendCommand(opName, params);
         if (res.status === 'ok') {
           return { mode: 'in_editor_live (UndoRedo Enabled)', result: res.result };
+        } else {
+          return { mode: 'in_editor_live', error: res.error, status: 'error' };
         }
       }
-    } catch {}
+    } catch (e: any) {
+      // If TCP command failed, attempt headless fallback
+    }
 
     // 2. Fallback to Headless CLI execution
     const res = await this.executeHeadlessOp(opName, params);
@@ -1230,8 +1239,10 @@ class GodotMCPServer {
   }
 }
 
-const server = new GodotMCPServer();
-server.start().catch((err) => {
-  console.error('Fatal error running Godot MCP Server:', err);
-  process.exit(1);
-});
+if (process.env.NODE_ENV !== 'test') {
+  const server = new GodotMCPServer();
+  server.start().catch((err) => {
+    console.error('Fatal error running Godot MCP Server:', err);
+    process.exit(1);
+  });
+}

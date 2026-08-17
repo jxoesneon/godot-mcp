@@ -1,4 +1,4 @@
-import { WebSocket } from 'ws';
+import net from 'net';
 
 export interface BridgeResponse {
   id: string;
@@ -12,7 +12,7 @@ export class GodotEditorBridge {
   private port: number;
   private timeoutMs: number;
 
-  constructor(host = '127.0.0.1', port = 6505, timeoutMs = 5000) {
+  constructor(host = '127.0.0.1', port = 6505, timeoutMs = 8000) {
     this.host = host;
     this.port = port;
     this.timeoutMs = timeoutMs;
@@ -20,8 +20,8 @@ export class GodotEditorBridge {
 
   public async isEditorConnected(): Promise<boolean> {
     try {
-      const res = await this.sendCommand('ping', {}, 1500);
-      return res.status === 'ok';
+      const res = await this.sendCommand('ping', {}, 2000);
+      return res && res.status === 'ok';
     } catch {
       return false;
     }
@@ -29,36 +29,38 @@ export class GodotEditorBridge {
 
   public sendCommand(command: string, params: Record<string, any> = {}, customTimeout?: number): Promise<BridgeResponse> {
     return new Promise((resolve, reject) => {
-      const url = `ws://${this.host}:${this.port}`;
-      const ws = new WebSocket(url);
-      const reqId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+      const reqId = `req_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const timeout = customTimeout || this.timeoutMs;
 
-      const timer = setTimeout(() => {
-        try {
-          ws.close();
-        } catch {}
-        reject(new Error(`Godot Editor WebSocket command '${command}' timed out after ${timeout}ms`));
-      }, timeout);
-
-      ws.on('open', () => {
+      const client = net.createConnection({ host: this.host, port: this.port }, () => {
         const payload = JSON.stringify({ id: reqId, command, params });
-        ws.send(payload);
+        client.write(payload);
       });
 
-      ws.on('message', (data) => {
-        clearTimeout(timer);
+      let buffer = '';
+      const timer = setTimeout(() => {
+        try { client.destroy(); } catch {}
+        reject(new Error(`Godot Editor TCP command '${command}' timed out after ${timeout}ms`));
+      }, timeout);
+
+      client.on('data', (chunk) => {
+        buffer += chunk.toString();
+        let jsonStr = buffer;
+        const idx = buffer.indexOf('\r\n\r\n');
+        if (idx !== -1) {
+          jsonStr = buffer.substring(idx + 4);
+        }
         try {
-          const parsed = JSON.parse(data.toString()) as BridgeResponse;
-          ws.close();
+          const parsed = JSON.parse(jsonStr.trim()) as BridgeResponse;
+          clearTimeout(timer);
+          client.end();
           resolve(parsed);
-        } catch (err: any) {
-          ws.close();
-          reject(new Error(`Failed to parse response from Godot Editor: ${err.message}`));
+        } catch {
+          // Chunk is still streaming, wait for complete JSON object
         }
       });
 
-      ws.on('error', (err) => {
+      client.on('error', (err) => {
         clearTimeout(timer);
         reject(err);
       });

@@ -92,6 +92,8 @@ func process_command(cmd: String, params: Dictionary) -> Dictionary:
     match cmd:
         "ping":
             return {"status": "ok", "result": {"version": "2.0.0", "mode": "in_editor"}}
+        "get_godot_version":
+            return {"status": "ok", "result": Engine.get_version_info()}
 
         "execute_gdscript":
             return execute_gdscript_in_editor(params)
@@ -436,7 +438,7 @@ func inspect_node_in_editor(params: Dictionary) -> Dictionary:
     var include_groups = params.get("include_groups", true)
     var include_children = params.get("include_children", true)
 
-    var target = root if node_path == "." else root.get_node_or_null(node_path)
+    var target = root if (node_path == "." or node_path == "" or (root and node_path == root.name)) else root.get_node_or_null(node_path)
     if not target:
         return {"status": "error", "error": "Target node not found: " + node_path}
 
@@ -1229,7 +1231,7 @@ func list_signals_in_editor(params: Dictionary) -> Dictionary:
     if not root:
         return {"status": "error", "error": "No active scene open in editor"}
 
-    var target_node = root if (node_path == "." or node_path == "") else root.get_node_or_null(node_path)
+    var target_node = root if (node_path == "." or node_path == "" or (root and node_path == root.name)) else root.get_node_or_null(node_path)
     if not target_node:
         return {"status": "error", "error": "Node not found at path: " + node_path}
 
@@ -3970,19 +3972,41 @@ func _generate_blackboard_script(variables: Dictionary) -> String:
 
 
 func execute_gdscript_in_editor(params: Dictionary) -> Dictionary:
-    var code = params.get("code", "")
+    var code: String = String(params.get("code", params.get("script_code", params.get("script", ""))))
+    if code.strip_edges() == "":
+        return {"status": "error", "error": "No GDScript code provided."}
+    
     var script = GDScript.new()
-    script.source_code = "func eval():\n"
-    for line in code.split("\n"):
-        script.source_code += "\t" + line + "\n"
+    var lines = code.split("\n")
+    var has_func = false
+    for l in lines:
+        if l.strip_edges().begins_with("func "):
+            has_func = true
+            break
+            
+    if has_func:
+        script.source_code = "@tool\nextends RefCounted\n\n" + code
+    else:
+        script.source_code = "@tool\nextends RefCounted\n\nfunc eval():\n"
+        for line in lines:
+            script.source_code += "\t" + line + "\n"
+            
     var err = script.reload()
     if err != OK:
-        return {"status": "error", "error": "Failed to compile GDScript code."}
+        return {"status": "error", "error": "Failed to compile GDScript code (Error %d)." % err}
+    
     var obj = RefCounted.new()
     obj.set_script(script)
-    var result = obj.call("eval")
-    var str_res = str(result)
-    return {"status": "ok", "result": str_res}
+    var func_to_call = "eval"
+    if not obj.has_method("eval") and has_func:
+        for l in lines:
+            var cl = l.strip_edges()
+            if cl.begins_with("func "):
+                func_to_call = cl.substr(5).split("(")[0].strip_edges()
+                break
+                
+    var result = obj.call(func_to_call)
+    return {"status": "ok", "result": result}
 
 func read_resource_in_editor(params: Dictionary) -> Dictionary:
     var res_path = params.get("resource_path", "")
