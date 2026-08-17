@@ -28,7 +28,7 @@ func _enter_tree():
 	dock_instance.server_node = server_node
 	dock_instance.editor_interface = get_editor_interface()
 	server_node.dock_instance = dock_instance
-	add_control_to_bottom_panel(dock_instance, "🤖 Antigravity AI")
+	add_control_to_bottom_panel(dock_instance, "🤖 Godot MCP")
 
 	print("[Godot MCP Pro Bridge] Server listening on port 6505. AI Dock and Debugger attached.")
 

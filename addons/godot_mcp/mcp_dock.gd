@@ -33,7 +33,7 @@ func _build_ui():
 	# --- Header ---
 	var header = HBoxContainer.new()
 	var title = Label.new()
-	title.text = "🤖 Antigravity AI Bridge"
+	title.text = "🤖 Godot MCP Bridge"
 	title.add_theme_font_size_override("font_size", 14)
 	header.add_child(title)
 
