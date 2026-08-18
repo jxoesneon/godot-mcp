@@ -313,7 +313,28 @@ export class GodotMCPServer {
       },
       {
         name: 'get_debugger_errors',
-        description: 'Retrieves real-time runtime errors, stack traces, and debugger session events captured by the MCP Debugger Plugin.',
+        description: 'Retrieves real-time runtime errors, stack traces, and debugger session events captured by the MCP Debugger Plugin. Supports optional filtering by type, severity, and timestamp.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', description: 'Filter by error type: "runtime_error", "output_error", "output_warning", "debug_break", "session_event"' },
+            severity: { type: 'string', description: 'Filter by severity: "error" or "warning"' },
+            since: { type: 'number', description: 'Only return errors after this Unix timestamp (float)' },
+            exclude_session_events: { type: 'boolean', description: 'If true, excludes benign session lifecycle events (stopped/breaked/continued)' }
+          }
+        }
+      },
+      {
+        name: 'clear_debugger_errors',
+        description: 'Clears all captured debugger errors and warnings from the MCP Debugger Plugin buffer.',
+        inputSchema: {
+          type: 'object',
+          properties: {}
+        }
+      },
+      {
+        name: 'get_debugger_error_counts',
+        description: 'Returns a summary count of captured debugger errors by category (errors, warnings, output_errors, debug_breaks, session_events, total, connected_debuggers).',
         inputSchema: {
           type: 'object',
           properties: {}

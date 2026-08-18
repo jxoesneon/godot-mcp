@@ -108,6 +108,10 @@ func process_command(cmd: String, params: Dictionary) -> Dictionary:
             return get_active_script_editor_in_editor(params)
         "get_debugger_errors":
             return get_debugger_errors_in_editor(params)
+        "clear_debugger_errors":
+            return clear_debugger_errors_in_editor(params)
+        "get_debugger_error_counts":
+            return get_debugger_error_counts_in_editor(params)
 
         "execute_gdscript":
             return execute_gdscript_in_editor(params)
@@ -4124,7 +4128,38 @@ func get_active_script_editor_in_editor(_params: Dictionary) -> Dictionary:
         }
     }
 
-func get_debugger_errors_in_editor(_params: Dictionary) -> Dictionary:
-    if debugger_plugin and debugger_plugin.has_method("get_errors"):
-        return {"status": "ok", "result": debugger_plugin.get_errors()}
-    return {"status": "ok", "result": []}
+func get_debugger_errors_in_editor(params: Dictionary) -> Dictionary:
+    if not debugger_plugin:
+        return {"status": "ok", "result": [], "counts": {}}
+    var filter = {}
+    if params.has("type"):
+        filter["type"] = params["type"]
+    if params.has("severity"):
+        filter["severity"] = params["severity"]
+    if params.has("since"):
+        filter["since"] = params["since"]
+    if params.has("exclude_session_events"):
+        filter["exclude_session_events"] = params["exclude_session_events"]
+    if debugger_plugin.has_method("get_errors_filtered") and not filter.is_empty():
+        var result = debugger_plugin.get_errors_filtered(filter)
+        var counts = debugger_plugin.get_error_counts() if debugger_plugin.has_method("get_error_counts") else {}
+        return {"status": "ok", "result": result, "counts": counts}
+    if debugger_plugin.has_method("get_errors"):
+        var result = debugger_plugin.get_errors()
+        var counts = debugger_plugin.get_error_counts() if debugger_plugin.has_method("get_error_counts") else {}
+        return {"status": "ok", "result": result, "counts": counts}
+    return {"status": "ok", "result": [], "counts": {}}
+
+func clear_debugger_errors_in_editor(_params: Dictionary) -> Dictionary:
+    if debugger_plugin and debugger_plugin.has_method("clear_errors"):
+        debugger_plugin.clear_errors()
+        return {"status": "ok", "result": "Errors cleared"}
+    return {"status": "ok", "result": "No debugger plugin"}
+
+func get_debugger_error_counts_in_editor(_params: Dictionary) -> Dictionary:
+    if debugger_plugin and debugger_plugin.has_method("get_error_counts"):
+        var counts = debugger_plugin.get_error_counts()
+        var dbg_count = debugger_plugin.get_connected_debugger_count() if debugger_plugin.has_method("get_connected_debugger_count") else 0
+        counts["connected_debuggers"] = dbg_count
+        return {"status": "ok", "result": counts}
+    return {"status": "ok", "result": {}}
