@@ -20,6 +20,7 @@ func _enter_tree():
 
 	# 2. Setup Debugger Telemetry Plugin
 	debugger_instance = mcp_debugger_script.new()
+	debugger_instance.editor_interface = get_editor_interface()
 	add_debugger_plugin(debugger_instance)
 	server_node.debugger_plugin = debugger_instance
 
