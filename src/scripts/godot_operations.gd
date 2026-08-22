@@ -349,6 +349,37 @@ func duplicate_node(params: Dictionary) -> Dictionary:
 
     return {"status": "ok", "result": {"duplicated_node": dup.name, "path": String(dup.get_path())}}
 
+func instantiate_scene(params: Dictionary) -> Dictionary:
+    var scene_path = params.get("scene_path", "")
+    var target_scene_path = params.get("target_scene_path", params.get("subscene_path", ""))
+    var parent_path = params.get("parent_path", ".")
+    var node_name = params.get("node_name", "")
+
+    if target_scene_path == "" or not FileAccess.file_exists(target_scene_path):
+        return {"status": "error", "error": "Invalid target_scene_path: " + target_scene_path}
+
+    var packed = ResourceLoader.load(scene_path) as PackedScene
+    if not packed:
+        return {"status": "error", "error": "Failed to load host scene: " + scene_path}
+    var root = packed.instantiate()
+    var parent = root if (parent_path == "." or parent_path == "") else root.get_node_or_null(parent_path)
+    if not parent:
+        return {"status": "error", "error": "Parent node not found at: " + parent_path}
+
+    var subscene_packed = ResourceLoader.load(target_scene_path) as PackedScene
+    if not subscene_packed:
+        return {"status": "error", "error": "Failed to load subscene: " + target_scene_path}
+    var inst = subscene_packed.instantiate()
+    if node_name != "":
+        inst.name = node_name
+    parent.add_child(inst)
+    inst.owner = root
+
+    var new_packed = PackedScene.new()
+    new_packed.pack(root)
+    ResourceSaver.save(new_packed, scene_path)
+    return {"status": "ok", "result": {"instantiated_node": inst.name, "path": String(inst.get_path())}}
+
 func inspect_node(params: Dictionary) -> Dictionary:
     var scene_path = params.get("scene_path", "")
     var node_path = params.get("node_path", ".")
@@ -519,8 +550,8 @@ func get_uid(params: Dictionary) -> Dictionary:
         return {"status": "error", "error": "Missing file_path parameter"}
     var uid_int = ResourceLoader.get_resource_uid(file_path)
     var uid_text = ""
-    if uid_int != -1 and ClassDB.class_exists("ResourceUid"):
-        uid_text = ResourceUid.id_to_text(uid_int)
+    if uid_int != -1 and ClassDB.class_exists("ResourceUID"):
+        uid_text = ResourceUID.id_to_text(uid_int)
     elif uid_int != -1:
         uid_text = "uid://" + String.num_int64(uid_int, 36)
     return {
@@ -811,7 +842,7 @@ func _parse_gdscript_ast_text(code: String) -> Dictionary:
         # 2. extends
         var m_ext = re_extends.search(clean_line)
         if m_ext:
-            ast["extends"] = m_ext.get_string(1).strip_edges("\"'")
+            ast["extends"] = m_ext.get_string(1).trim_prefix("\"").trim_suffix("\"").trim_prefix("'").trim_suffix("'")
             pending_export_anno = ""
             idx += 1
             continue
@@ -834,7 +865,7 @@ func _parse_gdscript_ast_text(code: String) -> Dictionary:
         var m_ic = re_inner_class.search(clean_line)
         if m_ic:
             var ic_name = m_ic.get_string(1)
-            var ic_extends = m_ic.get_string(2).strip_edges("\"'")
+            var ic_extends = m_ic.get_string(2).trim_prefix("\"").trim_suffix("\"").trim_prefix("'").trim_suffix("'")
             var ic_indent = _get_indent_level(line)
 
             var ic_lines: Array = []
@@ -1062,8 +1093,8 @@ func find_script_references(params: Dictionary) -> Dictionary:
     if FileAccess.file_exists(res_path):
         if ResourceLoader.has_method("get_resource_uid"):
             var uid_val = ResourceLoader.get_resource_uid(res_path)
-            if uid_val > 0 and ResourceUid.has_method("id_to_text"):
-                var uid_text = ResourceUid.id_to_text(uid_val)
+            if uid_val > 0 and ClassDB.class_exists("ResourceUID") and ResourceUID.has_method("id_to_text"):
+                var uid_text = ResourceUID.id_to_text(uid_val)
                 if uid_text != "" and not (uid_text in search_tokens):
                     search_tokens.append(uid_text)
 
@@ -2720,7 +2751,7 @@ func create_shape_resource(shape_type: String, shape_params: Dictionary, is_3d: 
                 shape.height = float(shape_params.get("height", 2.0))
                 return shape
             "worldboundary", "world_boundary":
-                var shape = WorldBoundary3D.new()
+                var shape = WorldBoundaryShape3D.new()
                 var norm = parse_vector3(shape_params.get("normal", Vector3.UP))
                 var d = float(shape_params.get("d", shape_params.get("distance", 0.0)))
                 shape.plane = Plane(norm, d)
@@ -2770,7 +2801,7 @@ func create_shape_resource(shape_type: String, shape_params: Dictionary, is_3d: 
                 shape.b = parse_vector2(shape_params.get("b", Vector2(0, 10)))
                 return shape
             "worldboundary", "world_boundary":
-                var shape = WorldBoundary2D.new()
+                var shape = WorldBoundaryShape2D.new()
                 shape.normal = parse_vector2(shape_params.get("normal", Vector2.UP))
                 shape.distance = float(shape_params.get("d", shape_params.get("distance", 0.0)))
                 return shape
@@ -3395,29 +3426,88 @@ func replay_input_sequence(params: Dictionary) -> Dictionary:
     }
 
 func take_screenshot(params: Dictionary) -> Dictionary:
+    var target_mode: String = String(params.get("target", "auto")).to_lower()
+    var scene_path: String = String(params.get("scene_path", ""))
+    
+    var img: Image = null
+    var resolved_target: String = ""
+
+    # Offscreen scene rendering if scene_path provided or target is scene
+    if scene_path != "" or target_mode in ["scene", "headless_scene"]:
+        if scene_path != "" and ResourceLoader.exists(scene_path):
+            img = _render_scene_offscreen(scene_path, params)
+            resolved_target = "rendered_scene: " + scene_path
+
+    if not img or img.is_empty():
+        var root = get_root()
+        if root:
+            var vp = root.get_viewport()
+            if vp and vp.get_texture():
+                img = vp.get_texture().get_image()
+                resolved_target = "root_viewport"
+        
+        if not img or img.is_empty():
+            var screen_img = DisplayServer.screen_get_image()
+            if screen_img and not screen_img.is_empty():
+                img = screen_img
+                resolved_target = "display_server_screen"
+
+    if not img or img.is_empty():
+        return {"status": "error", "error": "Failed to capture image from viewport or scene"}
+
+    params["resolved_target"] = resolved_target
+    return process_and_encode_image(img, params)
+
+func _render_scene_offscreen(scene_path: String, params: Dictionary) -> Image:
+    var pck = ResourceLoader.load(scene_path)
+    if not (pck is PackedScene):
+        return null
+    var inst = (pck as PackedScene).instantiate()
+    if not inst:
+        return null
+        
+    var render_w: int = int(params.get("max_width", params.get("width", 1280)))
+    var render_h: int = int(params.get("max_height", params.get("height", 720)))
+    if render_w <= 0: render_w = 1280
+    if render_h <= 0: render_h = 720
+    
+    var vp: SubViewport = SubViewport.new()
+    vp.size = Vector2i(render_w, render_h)
+    vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    
     var root = get_root()
     if not root:
-        return {"status": "error", "error": "Root viewport unavailable"}
-
-    var vp = root.get_viewport()
-    if not vp:
-        return {"status": "error", "error": "Viewport unavailable"}
-
+        return null
+        
+    root.add_child(vp)
+    vp.add_child(inst)
+    
+    var cam: Camera3D = null
+    for c in vp.find_children("*", "Camera3D", true, false):
+        cam = c as Camera3D
+        break
+        
+    if not cam:
+        cam = Camera3D.new()
+        cam.position = Vector3(0, 5, 15)
+        cam.look_at(Vector3.ZERO, Vector3.UP)
+        vp.add_child(cam)
+        cam.current = true
+        
+    RenderingServer.force_draw(false)
     var tex = vp.get_texture()
-    if not tex:
-        return {"status": "error", "error": "Viewport texture unavailable"}
-
-    var img = tex.get_image()
-    if not img or img.is_empty():
-        return {"status": "error", "error": "Failed to retrieve image from viewport"}
-
-    return process_and_encode_image(img, params)
+    var img = tex.get_image() if tex else null
+    
+    vp.queue_free()
+    return img
 
 func process_and_encode_image(img: Image, params: Dictionary) -> Dictionary:
     var format_str = String(params.get("format", "png")).to_lower()
     var max_width = int(params.get("max_width", 0))
     var max_height = int(params.get("max_height", 0))
-    var raw_quality = params.get("quality", 0.75)
+    var raw_quality = params.get("quality", 0.85)
+    var output_path = String(params.get("output_path", ""))
+    var resolved_target = String(params.get("resolved_target", "viewport"))
 
     var quality = float(raw_quality)
     if quality > 1.0:
@@ -3440,17 +3530,39 @@ func process_and_encode_image(img: Image, params: Dictionary) -> Dictionary:
         new_w = int(new_w * scale)
 
     if new_w != orig_w or new_h != orig_h:
-        img.resize(new_w, new_h, Image.INTERPOLATION_LANCZOS)
+        img.resize(new_w, new_h, Image.INTERPOLATE_LANCZOS)
 
     var buffer: PackedByteArray
     var mime_type = "image/png"
 
-    if format_str == "jpg" or format_str == "jpeg":
+    if format_str in ["jpg", "jpeg"]:
         buffer = img.save_jpg_to_buffer(quality)
         mime_type = "image/jpeg"
+    elif format_str == "webp":
+        buffer = img.save_webp_to_buffer(false, quality)
+        mime_type = "image/webp"
     else:
         buffer = img.save_png_to_buffer()
         mime_type = "image/png"
+
+    var saved_file_path: String = ""
+    var markdown_link: String = ""
+
+    if output_path != "":
+        var global_save_path = output_path
+        if output_path.begins_with("res://") or output_path.begins_with("user://"):
+            global_save_path = ProjectSettings.globalize_path(output_path)
+        
+        var dir_path = global_save_path.get_base_dir()
+        if not DirAccess.dir_exists_absolute(dir_path):
+            DirAccess.make_dir_recursive_absolute(dir_path)
+        
+        var f = FileAccess.open(global_save_path, FileAccess.WRITE)
+        if f:
+            f.store_buffer(buffer)
+            f.close()
+            saved_file_path = global_save_path
+            markdown_link = "![Godot Screenshot](file://%s)" % global_save_path
 
     var b64 = Marshalls.raw_to_base64(buffer)
     return {
@@ -3460,7 +3572,12 @@ func process_and_encode_image(img: Image, params: Dictionary) -> Dictionary:
             "mime_type": mime_type,
             "width": img.get_width(),
             "height": img.get_height(),
-            "format": format_str
+            "original_width": orig_w,
+            "original_height": orig_h,
+            "format": format_str,
+            "target": resolved_target,
+            "file_path": saved_file_path,
+            "markdown_link": markdown_link
         }
     }
 
@@ -3477,14 +3594,7 @@ func parse_key_code(val) -> Key:
         return kc
     return KEY_NONE
 
-func parse_vector2(val, default_val: Vector2 = Vector2.ZERO) -> Vector2:
-    if typeof(val) == TYPE_VECTOR2:
-        return val
-    elif typeof(val) == TYPE_DICTIONARY:
-        return Vector2(float(val.get("x", default_val.x)), float(val.get("y", default_val.y)))
-    elif typeof(val) == TYPE_ARRAY and val.size() >= 2:
-        return Vector2(float(val[0]), float(val[1]))
-    return default_val
+
 
 func import_asset(params: Dictionary) -> Dictionary:
     var asset_path = String(params.get("asset_path", params.get("path", params.get("file_path", ""))))

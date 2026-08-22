@@ -226,6 +226,108 @@ export class GodotMCPServer {
             });
           }
 
+          case 'lsp_diagnostics': {
+            // Project-wide GDScript parse/diagnostic check via headless --check-only per script.
+            const projectPath = parsedArgs.project_path || '.';
+            const abs = path.resolve(projectPath);
+            const scripts: string[] = [];
+            const walkLsp = (d: string) => {
+              for (const f of fs.readdirSync(d)) {
+                const full = path.join(d, f);
+                let st; try { st = fs.statSync(full); } catch { continue; }
+                if (st.isDirectory()) {
+                  if (!f.startsWith('.') && f !== 'addons' && !full.includes('node_modules')) walkLsp(full);
+                } else if (f.endsWith('.gd')) scripts.push(full);
+              }
+            };
+            const autoloadNames = new Set<string>();
+            try {
+              const pg = fs.readFileSync(path.join(abs, 'project.godot'), 'utf8');
+              const am = pg.match(/\[autoload\]([\s\S]*?)(\n\[|$)/);
+              if (am) {
+                for (const line of am[1].split("\n")) {
+                  const nm = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+                  if (nm) autoloadNames.add(nm[1]);
+                }
+              }
+            } catch {}
+
+            walkLsp(abs);
+            const onlyErrors = parsedArgs.errors_only === true;
+            const results: any[] = [];
+            let errors = 0, warnings = 0, checked = 0;
+            const runOne = (i: number): Promise<void> => {
+              if (i >= scripts.length) return Promise.resolve();
+              return new Promise((resolve) => {
+                const child = spawn(this.godotPath!, ['--headless', '--check-only', '--script', scripts[i], '--path', abs]);
+                let errOut = '';
+                child.stderr.on('data', (d) => errOut += d.toString());
+                child.on('close', () => {
+                  checked++;
+                  for (const line of errOut.split(String.fromCharCode(10))) {
+                    const m = line.match(/(Parse Error|Script Error|ERROR|WARNING):\s*(.*)/);
+                    if (!m) continue;
+                    const msgRaw = (m[2] || line.trim()).trim();
+                    const identMatch = msgRaw.match(/Identifier not found:\s*"?([A-Za-z_][A-Za-z0-9_]*)"?/);
+                    if (identMatch && autoloadNames.has(identMatch[1])) continue;
+                    const isErr = /Error/i.test(m[1]) && !/WARNING/i.test(line);
+                    if (isErr) errors++; else if (onlyErrors) continue; else warnings++;
+                    results.push({ script: path.relative(abs, scripts[i]), severity: isErr ? 'error' : 'warning', message: msgRaw });
+                  }
+                  resolve(runOne(i + 1));
+                });
+              });
+            };
+            return runOne(0).then(() => ({
+              content: [{ type: 'text', text: JSON.stringify({ scripts_checked: checked, errors, warnings, diagnostics: results }, null, 2) }],
+            }));
+          }
+
+          case 'get_script_stats': {
+            const projectPath = path.resolve(parsedArgs.project_path || '.');
+            const stats: any[] = [];
+            const walkStats = (d: string) => {
+              for (const f of fs.readdirSync(d)) {
+                const full = path.join(d, f);
+                let st; try { st = fs.statSync(full); } catch { continue; }
+                if (st.isDirectory()) {
+                  if (!f.startsWith('.') && f !== 'addons') walkStats(full);
+                } else if (f.endsWith('.gd')) {
+                  const lines = fs.readFileSync(full, 'utf8').split(String.fromCharCode(10));
+                  const funcs = lines.filter((l) => /^func /.test(l)).length;
+                  const classes = lines.filter((l) => /^class_name /.test(l)).length;
+                  stats.push({ file: path.relative(projectPath, full), lines: lines.length, functions: funcs, class_name: classes > 0 });
+                }
+              }
+            };
+            walkStats(projectPath);
+            stats.sort((a, b) => b.lines - a.lines);
+            return { content: [{ type: 'text', text: JSON.stringify({ total_scripts: stats.length, total_lines: stats.reduce((a, s) => a + s.lines, 0), scripts: stats }, null, 2) }] };
+          }
+
+          case 'search_scripts': {
+            const projectPath = path.resolve(parsedArgs.project_path || '.');
+            const pattern = new RegExp(parsedArgs.pattern as string, (parsedArgs.flags as string) || 'g');
+            const matches: any[] = [];
+            const walkSearch = (d: string) => {
+              for (const f of fs.readdirSync(d)) {
+                const full = path.join(d, f);
+                let st; try { st = fs.statSync(full); } catch { continue; }
+                if (st.isDirectory()) {
+                  if (!f.startsWith('.') && f !== 'addons') walkSearch(full);
+                } else if (f.endsWith('.gd')) {
+                  const lines = fs.readFileSync(full, 'utf8').split(String.fromCharCode(10));
+                  lines.forEach((line, i) => {
+                    pattern.lastIndex = 0;
+                    if (pattern.test(line)) matches.push({ file: path.relative(projectPath, full), line: i + 1, text: line.trim().slice(0, 200) });
+                  });
+                }
+              }
+            };
+            walkSearch(projectPath);
+            return { content: [{ type: 'text', text: JSON.stringify({ pattern: String(parsedArgs.pattern), match_count: matches.length, matches: matches.slice(0, (parsedArgs.limit as number) || 50) }, null, 2) }] };
+          }
+
           case 'list_projects': {
             const dir = parsedArgs.directory || '.';
             const projects: string[] = [];
@@ -423,6 +525,39 @@ export class GodotMCPServer {
         name: 'get_godot_version',
         description: 'Gets installed Godot executable version.',
         inputSchema: { type: 'object', properties: {} },
+      },
+      {
+        name: 'lsp_diagnostics',
+        description: 'Project-wide GDScript parse/diagnostic audit. Runs headless --check-only on every .gd script and reports errors and warnings per file. The closest thing to full-project LSP diagnostics.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            project_path: { type: 'string', description: 'Project directory path' },
+            errors_only: { type: 'boolean', description: 'Only report errors, skip warnings' },
+          },
+        },
+      },
+      {
+        name: 'get_script_stats',
+        description: 'Lists all GDScript files in a project with line counts, function counts, and class_name presence — sorted by size. Quick project shape overview.',
+        inputSchema: {
+          type: 'object',
+          properties: { project_path: { type: 'string', description: 'Project directory path' } },
+        },
+      },
+      {
+        name: 'search_scripts',
+        description: 'Regex search across all .gd scripts in a project. Returns file, line number, and matching text (up to limit).',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            project_path: { type: 'string', description: 'Project directory path' },
+            pattern: { type: 'string', description: 'Regular expression to search for' },
+            flags: { type: 'string', description: 'RegExp flags (default g)' },
+            limit: { type: 'number', description: 'Max matches returned (default 50)' },
+          },
+          required: ['pattern'],
+        },
       },
       {
         name: 'list_projects',
@@ -1072,14 +1207,30 @@ export class GodotMCPServer {
       },
       {
         name: 'take_screenshot',
-        description: 'Captures viewport screenshot from active Godot editor window or running application as Base64 image.',
+        description: 'Captures viewport screenshot from active Godot editor 3D/2D viewport, running application, or renders a scene headlessly. Supports saving directly to disk/artifact and returns Base64 + Markdown image link for visual inspection.',
         inputSchema: {
           type: 'object',
           properties: {
-            format: { type: 'string', description: 'Image format: png or jpg (default: png)' },
+            target: {
+              type: 'string',
+              description: 'Target viewport to capture: "auto" (default), "viewport_3d", "viewport_2d", "main_screen", "running_game", "headless_scene"'
+            },
+            viewport_index: {
+              type: 'number',
+              description: 'Index of 3D editor viewport to capture (0-3, default: 0)'
+            },
+            scene_path: {
+              type: 'string',
+              description: 'Resource path of .tscn scene to render off-screen (e.g. res://scenes/space_flight.tscn)'
+            },
+            output_path: {
+              type: 'string',
+              description: 'Optional file path to save screenshot PNG/JPG/WebP image on disk (e.g. /path/to/artifact/screen.png)'
+            },
+            format: { type: 'string', description: 'Image format: "png", "jpg", "webp" (default: "png")' },
             max_width: { type: 'number', description: 'Maximum image width for downscaling' },
             max_height: { type: 'number', description: 'Maximum image height for downscaling' },
-            quality: { type: 'number', description: 'JPEG quality float 0.0-1.0 or int 1-100 (default: 0.75)' },
+            quality: { type: 'number', description: 'Compression quality float 0.0-1.0 or int 1-100 (default: 0.85)' },
           },
         },
       },

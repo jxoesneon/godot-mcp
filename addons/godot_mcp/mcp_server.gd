@@ -1547,22 +1547,132 @@ func replay_input_sequence(params: Dictionary) -> Dictionary:
     }
 
 func take_viewport_screenshot(params: Dictionary = {}) -> Dictionary:
-    if not editor_interface:
-        return {"status": "error", "error": "EditorInterface not available"}
+    var target_mode: String = String(params.get("target", "auto")).to_lower()
+    var vp_idx: int = int(params.get("viewport_index", 0))
+    
+    var img: Image = null
+    var resolved_target: String = ""
 
-    var vp = editor_interface.get_viewport()
-    if not vp:
-        return {"status": "error", "error": "Viewport unavailable"}
+    # 1. Explicit 3D Viewport
+    if target_mode in ["3d", "viewport_3d", "viewport3d"]:
+        if editor_interface:
+            var vp3d = editor_interface.get_editor_viewport_3d(vp_idx)
+            if vp3d and vp3d.get_texture():
+                img = vp3d.get_texture().get_image()
+                resolved_target = "editor_viewport_3d_%d" % vp_idx
 
-    var tex = vp.get_texture()
-    if not tex:
-        return {"status": "error", "error": "Viewport texture unavailable"}
+    # 2. Explicit 2D Viewport
+    elif target_mode in ["2d", "viewport_2d", "viewport2d"]:
+        if editor_interface:
+            var vp2d = editor_interface.get_editor_viewport_2d()
+            if vp2d and vp2d.get_texture():
+                img = vp2d.get_texture().get_image()
+                resolved_target = "editor_viewport_2d"
 
-    var img = tex.get_image()
+    # 3. Explicit Full Editor Window / Interface
+    elif target_mode in ["main_screen", "editor", "full_editor", "window"]:
+        if editor_interface:
+            var base = editor_interface.get_base_control()
+            if base and base.get_viewport() and base.get_viewport().get_texture():
+                img = base.get_viewport().get_texture().get_image()
+                resolved_target = "full_editor_window"
+        if not img or img.is_empty():
+            var screen_img = DisplayServer.screen_get_image()
+            if screen_img and not screen_img.is_empty():
+                img = screen_img
+                resolved_target = "display_server_screen"
+
+    # 4. Offscreen Scene Rendering
+    elif target_mode in ["scene", "headless_scene"] or (params.has("scene_path") and target_mode != "auto"):
+        var scene_path: String = String(params.get("scene_path", ""))
+        if scene_path != "" and ResourceLoader.exists(scene_path):
+            img = _render_scene_offscreen_in_editor(scene_path, params)
+            resolved_target = "rendered_scene: " + scene_path
+
+    # 5. Smart Auto-Detection Cascade
     if not img or img.is_empty():
-        return {"status": "error", "error": "Failed to retrieve image from viewport"}
+        # Check active 3D viewport
+        if editor_interface:
+            var vp3d = editor_interface.get_editor_viewport_3d(vp_idx)
+            if vp3d and vp3d.get_texture():
+                var test_img = vp3d.get_texture().get_image()
+                if test_img and not test_img.is_empty() and test_img.get_width() > 10 and test_img.get_height() > 10:
+                    img = test_img
+                    resolved_target = "editor_viewport_3d_%d" % vp_idx
+        
+        # Check 2D viewport
+        if (not img or img.is_empty()) and editor_interface:
+            var vp2d = editor_interface.get_editor_viewport_2d()
+            if vp2d and vp2d.get_texture():
+                var test_img = vp2d.get_texture().get_image()
+                if test_img and not test_img.is_empty() and test_img.get_width() > 10 and test_img.get_height() > 10:
+                    img = test_img
+                    resolved_target = "editor_viewport_2d"
 
+        # Check EditorInterface Main Viewport
+        if (not img or img.is_empty()) and editor_interface:
+            var vp = editor_interface.get_viewport()
+            if vp and vp.get_texture():
+                var test_img = vp.get_texture().get_image()
+                if test_img and not test_img.is_empty():
+                    img = test_img
+                    resolved_target = "editor_main_viewport"
+
+        # Check DisplayServer screen capture
+        if not img or img.is_empty():
+            var screen_img = DisplayServer.screen_get_image()
+            if screen_img and not screen_img.is_empty():
+                img = screen_img
+                resolved_target = "display_server_screen"
+
+    if not img or img.is_empty():
+        return {"status": "error", "error": "Failed to capture image from any viewport or display server."}
+
+    params["resolved_target"] = resolved_target
     return process_and_encode_image(img, params)
+
+func _render_scene_offscreen_in_editor(scene_path: String, params: Dictionary) -> Image:
+    var pck = ResourceLoader.load(scene_path)
+    if not (pck is PackedScene):
+        return null
+    var inst = (pck as PackedScene).instantiate()
+    if not inst:
+        return null
+        
+    var render_w: int = int(params.get("max_width", params.get("width", 1280)))
+    var render_h: int = int(params.get("max_height", params.get("height", 720)))
+    if render_w <= 0: render_w = 1280
+    if render_h <= 0: render_h = 720
+    
+    var vp: SubViewport = SubViewport.new()
+    vp.size = Vector2i(render_w, render_h)
+    vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    
+    var root = editor_interface.get_base_control() if editor_interface else (get_tree().root if get_tree() else null)
+    if not root:
+        return null
+        
+    root.add_child(vp)
+    vp.add_child(inst)
+    
+    var cam: Camera3D = null
+    for c in vp.find_children("*", "Camera3D", true, false):
+        cam = c as Camera3D
+        break
+        
+    if not cam:
+        cam = Camera3D.new()
+        cam.position = Vector3(0, 5, 15)
+        cam.look_at(Vector3.ZERO, Vector3.UP)
+        vp.add_child(cam)
+        cam.current = true
+        
+    RenderingServer.force_draw(false)
+    var tex = vp.get_texture()
+    var img = tex.get_image() if tex else null
+    
+    vp.queue_free()
+    return img
 
 func create_shader_material_in_editor(params: Dictionary) -> Dictionary:
     var shader_code = params.get("shader_code", params.get("code", ""))
@@ -3405,7 +3515,9 @@ func process_and_encode_image(img: Image, params: Dictionary) -> Dictionary:
     var format_str = String(params.get("format", "png")).to_lower()
     var max_width = int(params.get("max_width", 0))
     var max_height = int(params.get("max_height", 0))
-    var raw_quality = params.get("quality", 0.75)
+    var raw_quality = params.get("quality", 0.85)
+    var output_path = String(params.get("output_path", ""))
+    var resolved_target = String(params.get("resolved_target", "viewport"))
 
     var quality = float(raw_quality)
     if quality > 1.0:
@@ -3425,7 +3537,7 @@ func process_and_encode_image(img: Image, params: Dictionary) -> Dictionary:
     if max_height > 0 and new_h > max_height:
         var scale = float(max_height) / float(new_h)
         new_h = max_height
-        new_w = int(new_h * scale)
+        new_w = int(new_w * scale)
 
     if new_w != orig_w or new_h != orig_h:
         img.resize(new_w, new_h, Image.INTERPOLATE_LANCZOS)
@@ -3433,12 +3545,34 @@ func process_and_encode_image(img: Image, params: Dictionary) -> Dictionary:
     var buffer: PackedByteArray
     var mime_type = "image/png"
 
-    if format_str == "jpg" or format_str == "jpeg":
+    if format_str in ["jpg", "jpeg"]:
         buffer = img.save_jpg_to_buffer(quality)
         mime_type = "image/jpeg"
+    elif format_str == "webp":
+        buffer = img.save_webp_to_buffer(false, quality)
+        mime_type = "image/webp"
     else:
         buffer = img.save_png_to_buffer()
         mime_type = "image/png"
+
+    var saved_file_path: String = ""
+    var markdown_link: String = ""
+
+    if output_path != "":
+        var global_save_path = output_path
+        if output_path.begins_with("res://") or output_path.begins_with("user://"):
+            global_save_path = ProjectSettings.globalize_path(output_path)
+        
+        var dir_path = global_save_path.get_base_dir()
+        if not DirAccess.dir_exists_absolute(dir_path):
+            DirAccess.make_dir_recursive_absolute(dir_path)
+        
+        var f = FileAccess.open(global_save_path, FileAccess.WRITE)
+        if f:
+            f.store_buffer(buffer)
+            f.close()
+            saved_file_path = global_save_path
+            markdown_link = "![Godot Screenshot](file://%s)" % global_save_path
 
     var b64 = Marshalls.raw_to_base64(buffer)
     return {
@@ -3448,7 +3582,12 @@ func process_and_encode_image(img: Image, params: Dictionary) -> Dictionary:
             "mime_type": mime_type,
             "width": img.get_width(),
             "height": img.get_height(),
-            "format": format_str
+            "original_width": orig_w,
+            "original_height": orig_h,
+            "format": format_str,
+            "target": resolved_target,
+            "file_path": saved_file_path,
+            "markdown_link": markdown_link
         }
     }
 
@@ -4013,8 +4152,10 @@ func execute_gdscript_in_editor(params: Dictionary) -> Dictionary:
     if err != OK:
         return {"status": "error", "error": "Failed to compile GDScript code (Error %d)." % err}
     
-    var obj = RefCounted.new()
-    obj.set_script(script)
+    var obj = script.new()
+    if not obj:
+        return {"status": "error", "error": "Failed to instantiate GDScript object."}
+        
     var func_to_call = "eval"
     if not obj.has_method("eval") and has_func:
         for l in lines:
